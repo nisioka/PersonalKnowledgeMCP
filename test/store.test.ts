@@ -28,7 +28,7 @@ describe("DocumentStore", () => {
   afterEach(() => db.close());
 
   it("registers a document with defaults", async () => {
-    const doc = await store.register(full, { full_text: "自宅の住所は東京都です" });
+    const { document: doc } = await store.register(full, { full_text: "自宅の住所は東京都です" });
     expect(doc.id).toBeGreaterThan(0);
     expect(doc.scope).toBe("private"); // full's default write scope
     expect(doc.valid_until).toBe("9999-12-31");
@@ -86,7 +86,7 @@ describe("DocumentStore", () => {
   });
 
   it("excludes logically deleted documents", async () => {
-    const doc = await store.register(full, { full_text: "削除予定のメモ deletetest" });
+    const { document: doc } = await store.register(full, { full_text: "削除予定のメモ deletetest" });
     db.prepare("UPDATE documents SET deleted = 1 WHERE id = ?").run(doc.id);
     const hits = await store.search(full, { query: "削除予定" });
     expect(hits.length).toBe(0);
@@ -109,7 +109,7 @@ describe("DocumentStore", () => {
   });
 
   it("get() respects scope and lifecycle", async () => {
-    const priv = await store.register(full, { full_text: "private get test", scope: "private" });
+    const { document: priv } = await store.register(full, { full_text: "private get test", scope: "private" });
     expect(store.get(full, priv.id)?.id).toBe(priv.id);
     expect(store.get(family, priv.id)).toBeNull(); // family cannot read private
   });
@@ -118,5 +118,76 @@ describe("DocumentStore", () => {
     await store.register(full, { full_text: "簡単なメモ note" });
     const hits = await store.search(full, { query: '"(weird] query)*' });
     expect(Array.isArray(hits)).toBe(true);
+  });
+
+  it("supersedes prior versions via dedup_key (non-history doc_type)", async () => {
+    const first = await store.register(full, {
+      full_text: "保育園の電話番号 03-1111 numkey",
+      doc_type: "連絡先",
+      dedup_key: "保育園:電話",
+      scope: "shared",
+    });
+    const second = await store.register(full, {
+      full_text: "保育園の電話番号 03-2222 numkey",
+      doc_type: "連絡先",
+      dedup_key: "保育園:電話",
+      scope: "shared",
+    });
+    expect(second.superseded).toContain(first.document.id);
+
+    const hits = await store.search(family, { query: "numkey" });
+    expect(hits.length).toBe(1); // only the latest remains visible
+    expect(hits[0]!.snippet).toContain("03-2222");
+  });
+
+  it("does NOT supersede for history-preserving doc_types", async () => {
+    const a = await store.register(full, {
+      full_text: "2025年の固定資産税 taxkey", doc_type: "固定資産税", dedup_key: "固定資産税",
+    });
+    const b = await store.register(full, {
+      full_text: "2026年の固定資産税 taxkey", doc_type: "固定資産税", dedup_key: "固定資産税",
+    });
+    expect(b.superseded).toHaveLength(0);
+    const hits = await store.search(full, { query: "taxkey" });
+    expect(hits.length).toBe(2);
+    void a;
+  });
+
+  it("updates a document and re-indexes new text", async () => {
+    const { document } = await store.register(full, { full_text: "old content updatekey" });
+    const updated = await store.update(full, document.id, { full_text: "new content freshtoken" });
+    expect(updated.full_text).toBe("new content freshtoken");
+    expect((await store.search(full, { query: "freshtoken" })).length).toBe(1);
+    expect((await store.search(full, { query: "updatekey" })).length).toBe(0);
+  });
+
+  it("enforces scope on update and delete", async () => {
+    const { document } = await store.register(full, { full_text: "private secret upd", scope: "private" });
+    await expect(store.update(family, document.id, { full_text: "x" })).rejects.toThrow();
+    expect(() => store.softDelete(family, document.id)).toThrow();
+  });
+
+  it("soft-deletes and restores", async () => {
+    const { document } = await store.register(full, { full_text: "archiveme softkey" });
+    store.softDelete(full, document.id);
+    expect((await store.search(full, { query: "softkey" })).length).toBe(0);
+    store.restore(full, document.id);
+    expect((await store.search(full, { query: "softkey" })).length).toBe(1);
+  });
+
+  it("hard-deletes and drops the search indexes", async () => {
+    const { document } = await store.register(full, { full_text: "removeme hardkey" });
+    store.hardDelete(full, document.id);
+    expect(() => store.getForMutation(full, document.id)).toThrow();
+    expect((await store.search(full, { query: "hardkey" })).length).toBe(0);
+  });
+
+  it("finds upcoming expiries within a window", async () => {
+    await store.register(full, { full_text: "保証 soon", valid_until: dayOffset(5), doc_type: "保証書" });
+    await store.register(full, { full_text: "保証 far", valid_until: dayOffset(60), doc_type: "保証書" });
+    await store.register(full, { full_text: "no expiry" }); // sentinel, excluded
+    const upcoming = store.findUpcomingExpiries(14);
+    expect(upcoming.length).toBe(1);
+    expect(upcoming[0]!.days_left).toBe(5);
   });
 });

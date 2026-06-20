@@ -1,0 +1,156 @@
+"""OCR + structure-extraction HTTP service (design §3/§4, Phase 2).
+
+The TypeScript stack calls this service to turn an image/PDF into text
+(PaddleOCR) and then into structured metadata (Anthropic). Both steps are
+optional and degrade gracefully: if PaddleOCR is missing, /ocr errors clearly;
+if no ANTHROPIC_API_KEY is set, /extract returns minimal metadata so ingestion
+still stores the raw text.
+
+Run:  uvicorn ingest_service:app --host 127.0.0.1 --port 8011
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+import re
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
+
+PROMPTS_DIR = Path(os.environ.get("PK_PROMPTS_DIR", Path(__file__).resolve().parent.parent / "prompts"))
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+NO_EXPIRY = "9999-12-31"
+
+# Mirror of the TypeScript DocTypeRegistry default vocabulary (design §9.5).
+DEFAULT_DOC_TYPES = [
+    "保証書", "自治体通知", "学校手紙", "イベント案内", "連絡先",
+    "料金プラン", "確定申告メモ", "固定資産税", "支出記録", "日記", "メモ",
+]
+
+app = FastAPI(title="personal-knowledge ingest service")
+
+
+# --------------------------------------------------------------------------- OCR
+@lru_cache(maxsize=1)
+def _ocr_engine():
+    try:
+        from paddleocr import PaddleOCR
+    except ImportError as exc:  # pragma: no cover - depends on optional install
+        raise HTTPException(503, "PaddleOCR is not installed") from exc
+    # Japanese model also recognizes Latin characters.
+    return PaddleOCR(use_angle_cls=True, lang="japan", show_log=False)
+
+
+def _ocr_image_bytes(data: bytes) -> str:
+    import numpy as np
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(data)).convert("RGB")
+    result = _ocr_engine().ocr(np.array(image), cls=True)
+    lines: list[str] = []
+    for page in result or []:
+        for entry in page or []:
+            # entry = [box, (text, confidence)]
+            if entry and len(entry) >= 2 and entry[1]:
+                lines.append(str(entry[1][0]))
+    return "\n".join(lines)
+
+
+def ocr_file(data: bytes, filename: str, content_type: str | None) -> str:
+    is_pdf = (content_type or "").endswith("pdf") or filename.lower().endswith(".pdf")
+    if is_pdf:
+        try:
+            from pdf2image import convert_from_bytes
+        except ImportError as exc:  # pragma: no cover
+            raise HTTPException(503, "pdf2image/poppler not installed") from exc
+        pages = convert_from_bytes(data)
+        texts = []
+        for page in pages:
+            buf = io.BytesIO()
+            page.save(buf, format="PNG")
+            texts.append(_ocr_image_bytes(buf.getvalue()))
+        return "\n\n".join(texts)
+    return _ocr_image_bytes(data)
+
+
+# -------------------------------------------------------------------- extraction
+def _load_prompt(doc_type_hint: str | None) -> str:
+    if doc_type_hint:
+        candidate = PROMPTS_DIR / f"{doc_type_hint}.md"
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8")
+    return (PROMPTS_DIR / "default.md").read_text(encoding="utf-8")
+
+
+def _parse_json_object(text: str) -> dict[str, Any]:
+    # Tolerate code fences or surrounding prose; grab the first {...} block.
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise ValueError("no JSON object in model output")
+    return json.loads(match.group(0))
+
+
+def extract_metadata(full_text: str, doc_type_hint: str | None) -> dict[str, Any]:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        # Degrade gracefully: keep the text, no structured metadata.
+        return {"doc_type": doc_type_hint, "extracted": {}, "valid_until": NO_EXPIRY, "dedup_key": None}
+
+    from anthropic import Anthropic
+
+    prompt = (
+        _load_prompt(doc_type_hint)
+        .replace("{{DOC_TYPES}}", "\n".join(f"- {d}" for d in DEFAULT_DOC_TYPES))
+        .replace("{{FULL_TEXT}}", full_text)
+    )
+    client = Anthropic(api_key=api_key)
+    message = client.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = "".join(block.text for block in message.content if getattr(block, "type", None) == "text")
+    data = _parse_json_object(raw)
+    return {
+        "doc_type": data.get("doc_type") or doc_type_hint,
+        "extracted": data.get("extracted") or {},
+        "valid_until": data.get("valid_until") or NO_EXPIRY,
+        "dedup_key": data.get("dedup_key"),
+    }
+
+
+# ------------------------------------------------------------------------ routes
+class ExtractRequest(BaseModel):
+    full_text: str
+    doc_type_hint: str | None = None
+
+
+@app.get("/health")
+def health() -> dict[str, Any]:
+    return {"ok": True, "model": ANTHROPIC_MODEL, "extraction": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+
+
+@app.post("/ocr")
+async def ocr_endpoint(file: UploadFile = File(...)) -> dict[str, str]:
+    data = await file.read()
+    return {"full_text": ocr_file(data, file.filename or "upload", file.content_type)}
+
+
+@app.post("/extract")
+def extract_endpoint(req: ExtractRequest) -> dict[str, Any]:
+    result = extract_metadata(req.full_text, req.doc_type_hint)
+    result["full_text"] = req.full_text
+    return result
+
+
+@app.post("/ingest")
+async def ingest_endpoint(file: UploadFile = File(...), doc_type_hint: str | None = Form(default=None)) -> dict[str, Any]:
+    data = await file.read()
+    full_text = ocr_file(data, file.filename or "upload", file.content_type)
+    result = extract_metadata(full_text, doc_type_hint)
+    result["full_text"] = full_text
+    return result

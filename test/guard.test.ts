@@ -3,6 +3,7 @@ import {
   authenticate,
   AuthError,
   parseBearer,
+  resolvePrincipal,
   resolveReadScopes,
   resolveWriteScope,
 } from "../src/auth/guard.js";
@@ -47,6 +48,32 @@ describe("resolveReadScopes", () => {
   });
   it("throws 403 when no requested scope is readable", () => {
     expect(() => resolveReadScopes(family, ["private", "work"])).toThrow(AuthError);
+  });
+});
+
+describe("resolvePrincipal", () => {
+  const config = {
+    tokens: new Map<string, Principal>([["t-full", full]]),
+    accessEmails: new Map<string, Principal>([["dad@example.com", work]]),
+    trustAccessHeader: false,
+  };
+
+  it("prefers a valid bearer token", () => {
+    expect(resolvePrincipal({ authorization: "Bearer t-full" }, config)).toBe(full);
+  });
+
+  it("ignores the Access email header when not trusted", () => {
+    expect(() => resolvePrincipal({ accessEmail: "dad@example.com" }, config)).toThrow(AuthError);
+  });
+
+  it("maps the Access email to a principal when trusted", () => {
+    const trusted = { ...config, trustAccessHeader: true };
+    expect(resolvePrincipal({ accessEmail: "Dad@Example.com" }, trusted)).toBe(work);
+  });
+
+  it("rejects an unmapped Access email when trusted (403)", () => {
+    const trusted = { ...config, trustAccessHeader: true };
+    expect(() => resolvePrincipal({ accessEmail: "stranger@example.com" }, trusted)).toThrow(AuthError);
   });
 });
 

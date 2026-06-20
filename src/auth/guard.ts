@@ -40,6 +40,35 @@ export function authenticate(token: string | null, tokens: Map<string, Principal
   return principal;
 }
 
+export interface RequestAuth {
+  authorization?: string;
+  /** Value of Cf-Access-Authenticated-User-Email, if present. */
+  accessEmail?: string;
+}
+
+export interface AuthConfig {
+  tokens: Map<string, Principal>;
+  accessEmails: Map<string, Principal>;
+  trustAccessHeader: boolean;
+}
+
+/**
+ * Resolve a request to a principal: a bearer token wins; otherwise, if the
+ * server is configured to trust Cloudflare Access, the authenticated email
+ * header is mapped to a principal (design §7).
+ */
+export function resolvePrincipal(req: RequestAuth, config: AuthConfig): Principal {
+  const token = parseBearer(req.authorization);
+  if (token) return authenticate(token, config.tokens);
+
+  if (config.trustAccessHeader && req.accessEmail) {
+    const principal = config.accessEmails.get(req.accessEmail.toLowerCase());
+    if (!principal) throw new AuthError(`no scope mapping for ${req.accessEmail}`, 403);
+    return principal;
+  }
+  throw new AuthError("missing bearer token", 401);
+}
+
 /**
  * Compute the scope set to use in a read query.
  *

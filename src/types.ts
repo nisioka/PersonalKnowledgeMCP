@@ -31,6 +31,8 @@ export interface DocumentRow {
   /** `YYYY-MM-DD`. `NO_EXPIRY` means no expiry. */
   valid_until: string;
   deleted: boolean;
+  /** Loose name-matching key used to supersede prior versions (§9.1). */
+  dedup_key: string | null;
   created_at: string;
 }
 
@@ -44,6 +46,43 @@ export interface RegisterInput {
   /** Requested scope. Validated against the caller's token before use. */
   scope?: Scope;
   valid_until?: string;
+  /**
+   * Loose key identifying the logical document. When set on a non-history
+   * doc_type, prior entries with the same scope/doc_type/dedup_key are
+   * superseded (soft-deleted) unless `supersede` is false (§9.1).
+   */
+  dedup_key?: string | null;
+  /** Override automatic superseding. Default: supersede when dedup_key is set. */
+  supersede?: boolean;
+}
+
+/** Result of a register: the new doc plus any superseded prior versions. */
+export interface RegisterResult {
+  document: DocumentRow;
+  superseded: number[];
+}
+
+/** Fields an `update` may change. All optional; omitted fields are unchanged. */
+export interface UpdatePatch {
+  full_text?: string;
+  source_type?: string;
+  raw_path?: string | null;
+  doc_type?: string | null;
+  extracted?: Record<string, unknown>;
+  scope?: Scope;
+  valid_until?: string;
+  deleted?: boolean;
+  dedup_key?: string | null;
+}
+
+/** A document approaching expiry, for the proactive reminder cron (§4 / Phase 4). */
+export interface UpcomingExpiry {
+  id: number;
+  doc_type: string | null;
+  scope: Scope;
+  valid_until: string;
+  snippet: string;
+  days_left: number;
 }
 
 export type SearchMode = "keyword" | "vector" | "hybrid";

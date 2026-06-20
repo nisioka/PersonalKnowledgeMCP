@@ -56,10 +56,17 @@ afterAll(async () => {
 });
 
 describe("MCP server over HTTP", () => {
-  it("lists the register and search tools", async () => {
+  it("lists all knowledge tools", async () => {
     const client = await connect("full-token");
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["register", "search"]);
+    expect(tools.map((t) => t.name).sort()).toEqual([
+      "delete",
+      "list_doc_types",
+      "register",
+      "restore",
+      "search",
+      "update",
+    ]);
     await client.close();
   });
 
@@ -108,5 +115,34 @@ describe("MCP server over HTTP", () => {
     const payload = JSON.parse(textOf(search));
     expect(payload.count).toBe(0);
     await familyClient.close();
+  });
+
+  it("requires confirmation before a destructive delete", async () => {
+    const client = await connect("full-token");
+    const reg = await client.callTool({
+      name: "register",
+      arguments: { full_text: "confirmflowdoc to be deleted", scope: "shared" },
+    });
+    const id = JSON.parse(textOf(reg)).id as number;
+
+    // First call: no confirm -> preview, no mutation.
+    const preview = await client.callTool({ name: "delete", arguments: { id } });
+    const previewPayload = JSON.parse(textOf(preview));
+    expect(previewPayload.requires_confirmation).toBe(true);
+    expect(JSON.parse(textOf(await client.callTool({ name: "search", arguments: { query: "confirmflowdoc" } }))).count).toBe(1);
+
+    // Second call: confirm -> archived.
+    const done = await client.callTool({ name: "delete", arguments: { id, confirm: true } });
+    expect(JSON.parse(textOf(done)).mode).toBe("soft");
+    expect(JSON.parse(textOf(await client.callTool({ name: "search", arguments: { query: "confirmflowdoc" } }))).count).toBe(0);
+    await client.close();
+  });
+
+  it("lists the doc_type vocabulary", async () => {
+    const client = await connect("full-token");
+    const res = await client.callTool({ name: "list_doc_types", arguments: {} });
+    const payload = JSON.parse(textOf(res));
+    expect(payload.doc_types.some((d: { name: string }) => d.name === "保証書")).toBe(true);
+    await client.close();
   });
 });

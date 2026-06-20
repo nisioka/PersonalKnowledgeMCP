@@ -25,6 +25,14 @@ export interface AppConfig {
   tokens: Map<string, Principal>;
   /** True when falling back to built-in dev tokens (logged loudly). */
   usingDevTokens: boolean;
+  /**
+   * Cloudflare Access: authenticated email -> principal (design §7). Honored
+   * only when `trustAccessHeader` is true (i.e. the server sits behind Access,
+   * which strips/sets the Cf-Access-Authenticated-User-Email header).
+   */
+  accessEmails: Map<string, Principal>;
+  /** Trust the Cf-Access-Authenticated-User-Email header. Default false. */
+  trustAccessHeader: boolean;
   embedding: {
     /** Dimension of the vector column. Fixed at DB creation time. */
     dimension: number;
@@ -90,6 +98,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ? new Map(Object.entries(DEV_TOKENS))
     : parseTokens(env.PK_TOKENS as string);
 
+  // PK_ACCESS_EMAILS reuses the same principal shape, keyed by email.
+  const accessEmails = env.PK_ACCESS_EMAILS
+    ? new Map(
+        [...parseTokens(env.PK_ACCESS_EMAILS).entries()].map(([email, p]) => [email.toLowerCase(), p]),
+      )
+    : new Map<string, Principal>();
+
   const dimension = env.PK_EMBEDDING_DIM ? Number(env.PK_EMBEDDING_DIM) : 256;
   if (!Number.isInteger(dimension) || dimension <= 0) {
     throw new Error(`PK_EMBEDDING_DIM must be a positive integer, got "${env.PK_EMBEDDING_DIM}"`);
@@ -103,6 +118,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     dbPath: env.PK_DB_PATH ?? "data/knowledge.db",
     tokens,
     usingDevTokens,
+    accessEmails,
+    trustAccessHeader: env.PK_TRUST_ACCESS_HEADER === "true",
     embedding: { dimension },
   };
 }

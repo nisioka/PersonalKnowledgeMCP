@@ -2,6 +2,11 @@ node_modules/
 dist/
 *.log
 
+# Python
+__pycache__/
+*.pyc
+.venv/
+
 # Local data store (DB + original files live here, never committed)
 data/
 *.sqlite

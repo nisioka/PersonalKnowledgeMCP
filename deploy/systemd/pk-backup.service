@@ -1,0 +1,11 @@
+[Unit]
+Description=Personal Knowledge encrypted SQLite backup to Google Drive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pk
+WorkingDirectory=/opt/personal-knowledge-mcp
+EnvironmentFile=/opt/personal-knowledge-mcp/.env
+ExecStart=/usr/bin/node dist/backup/cli.js backup

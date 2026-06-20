@@ -1,0 +1,16 @@
+[Unit]
+Description=Personal Knowledge MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pk
+WorkingDirectory=/opt/personal-knowledge-mcp
+EnvironmentFile=/opt/personal-knowledge-mcp/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

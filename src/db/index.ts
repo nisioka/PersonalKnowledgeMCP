@@ -26,12 +26,15 @@ function schemaSql(embeddingDim: number): string {
       scope        TEXT    NOT NULL CHECK (scope IN ('private','work','shared')),
       valid_until  TEXT    NOT NULL DEFAULT '${NO_EXPIRY}',-- 'YYYY-MM-DD'; sentinel = no expiry
       deleted      INTEGER NOT NULL DEFAULT 0,             -- logical delete flag (manual archive)
+      dedup_key    TEXT,                                   -- loose name-matching key for updates (§9.1)
       created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
 
     -- The default search filter is (scope IN ...) AND deleted=0 AND valid_until>=today.
     CREATE INDEX IF NOT EXISTS idx_documents_filter ON documents(scope, deleted, valid_until);
     CREATE INDEX IF NOT EXISTS idx_documents_doc_type ON documents(doc_type);
+    -- Supports superseding prior versions of the same logical document (§9.1).
+    CREATE INDEX IF NOT EXISTS idx_documents_dedup ON documents(scope, doc_type, dedup_key);
 
     -- Keyword search. Rows are kept in sync manually with documents.id as rowid.
     -- The trigram tokenizer gives substring matching across scripts (so Japanese

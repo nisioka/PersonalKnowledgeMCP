@@ -7,13 +7,15 @@
  */
 import express, { type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import "dotenv/config";
 import { loadConfig } from "./config.js";
 import { openDatabase, type DB } from "./db/index.js";
 import type { AppConfig } from "./config.js";
 import type { Express } from "express";
 import { HashingEmbedder } from "./embedding.js";
 import { DocumentStore } from "./store/documents.js";
-import { authenticate, AuthError, parseBearer } from "./auth/guard.js";
+import { DocTypeRegistry } from "./doctype/registry.js";
+import { AuthError, resolvePrincipal } from "./auth/guard.js";
 import { buildServer } from "./mcp/server.js";
 import { audit } from "./audit.js";
 
@@ -27,7 +29,8 @@ function jsonRpcError(res: Response, status: number, message: string): void {
 
 export function createApp(config: AppConfig = loadConfig()): { app: Express; db: DB; config: AppConfig } {
   const db = openDatabase(config.dbPath, { embeddingDim: config.embedding.dimension });
-  const store = new DocumentStore(db, new HashingEmbedder(config.embedding.dimension));
+  const docTypes = new DocTypeRegistry();
+  const store = new DocumentStore(db, new HashingEmbedder(config.embedding.dimension), docTypes);
 
   const app = express();
   app.use(express.json({ limit: "10mb" }));
@@ -39,14 +42,20 @@ export function createApp(config: AppConfig = loadConfig()): { app: Express; db:
   app.post("/mcp", async (req: Request, res: Response) => {
     let principalName = "anonymous";
     try {
-      const principal = authenticate(parseBearer(req.header("authorization")), config.tokens);
+      const principal = resolvePrincipal(
+        {
+          authorization: req.header("authorization"),
+          accessEmail: req.header("cf-access-authenticated-user-email"),
+        },
+        config,
+      );
       principalName = principal.name;
 
       const method = (req.body as { method?: string } | undefined)?.method;
       if (method) audit("mcp.request", principalName, { method });
 
       // Stateless: one server + transport per request, closing on completion.
-      const server = buildServer({ store, principal });
+      const server = buildServer({ store, principal, docTypes });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on("close", () => {
         transport.close();

@@ -8,16 +8,27 @@
 import type { Principal } from "../config.js";
 import type { DB } from "../db/index.js";
 import type { Embedder } from "../embedding.js";
+import { DocTypeRegistry } from "../doctype/registry.js";
 import { resolveReadScopes, resolveWriteScope } from "../auth/guard.js";
 import {
   NO_EXPIRY,
   type DocumentRow,
   type RegisterInput,
+  type RegisterResult,
   type Scope,
   type SearchHit,
   type SearchMode,
   type SearchParams,
+  type UpcomingExpiry,
+  type UpdatePatch,
 } from "../types.js";
+
+export class NotFoundError extends Error {
+  constructor(message = "document not found or not accessible") {
+    super(message);
+    this.name = "NotFoundError";
+  }
+}
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SNIPPET_LEN = 600;
@@ -73,6 +84,7 @@ interface RawDocRow {
   scope: string;
   valid_until: string;
   deleted: number;
+  dedup_key: string | null;
   created_at: string;
 }
 
@@ -94,6 +106,7 @@ function parseRow(raw: RawDocRow): DocumentRow {
     scope: raw.scope as Scope,
     valid_until: raw.valid_until,
     deleted: raw.deleted !== 0,
+    dedup_key: raw.dedup_key,
     created_at: raw.created_at,
   };
 }
@@ -115,13 +128,18 @@ function toHit(raw: RawDocRow, score: number): SearchHit {
 }
 
 export class DocumentStore {
+  private readonly docTypes: DocTypeRegistry;
+
   constructor(
     private readonly db: DB,
     private readonly embedder: Embedder,
-  ) {}
+    docTypes?: DocTypeRegistry,
+  ) {
+    this.docTypes = docTypes ?? new DocTypeRegistry();
+  }
 
   /** Insert a new document. Scope is authorized via the guard, never trusted. */
-  async register(principal: Principal, input: RegisterInput): Promise<DocumentRow> {
+  async register(principal: Principal, input: RegisterInput): Promise<RegisterResult> {
     const fullText = (input.full_text ?? "").trim();
     if (fullText.length === 0) throw new ValidationError("full_text is required");
 
@@ -139,32 +157,64 @@ export class DocumentStore {
     const sourceType = input.source_type ?? "mcp";
     const rawPath = input.raw_path ?? null;
     const docType = input.doc_type ?? null;
+    const dedupKey = input.dedup_key ?? null;
+
+    // Supersede prior versions only for non-history doc_types with a dedup key (§9.1).
+    const supersede =
+      dedupKey !== null &&
+      !this.docTypes.keepsHistory(docType) &&
+      (input.supersede ?? true);
 
     // Embedding is async; compute it before the synchronous transaction.
     const embedding = vecBlob(await this.embedder.embed(fullText));
 
-    const insert = this.db.transaction(() => {
+    const tx = this.db.transaction(() => {
       const info = this.db
         .prepare(
-          `INSERT INTO documents (source_type, raw_path, full_text, doc_type, extracted, scope, valid_until)
-           VALUES (@sourceType, @rawPath, @fullText, @docType, @extracted, @scope, @validUntil)`,
+          `INSERT INTO documents (source_type, raw_path, full_text, doc_type, extracted, scope, valid_until, dedup_key)
+           VALUES (@sourceType, @rawPath, @fullText, @docType, @extracted, @scope, @validUntil, @dedupKey)`,
         )
-        .run({ sourceType, rawPath, fullText, docType, extracted: extractedJson, scope, validUntil });
+        .run({ sourceType, rawPath, fullText, docType, extracted: extractedJson, scope, validUntil, dedupKey });
       const id = Number(info.lastInsertRowid);
+      this.syncSearchIndexes(id, fullText, docType, embedding);
 
-      this.db
-        .prepare(`INSERT INTO documents_fts (rowid, full_text, doc_type) VALUES (?, ?, ?)`)
-        .run(id, fullText, docType ?? "");
-      // sqlite-vec's vec0 requires a BigInt for the integer primary key.
-      this.db
-        .prepare(`INSERT INTO documents_vec (document_id, embedding) VALUES (?, ?)`)
-        .run(BigInt(id), embedding);
-      return id;
+      let superseded: number[] = [];
+      if (supersede) {
+        const rows = this.db
+          .prepare(
+            `SELECT id FROM documents
+             WHERE scope = ? AND doc_type IS ? AND dedup_key = ? AND id <> ? AND deleted = 0`,
+          )
+          .all(scope, docType, dedupKey, id) as { id: number }[];
+        superseded = rows.map((r) => r.id);
+        if (superseded.length > 0) {
+          const placeholders = superseded.map(() => "?").join(",");
+          this.db.prepare(`UPDATE documents SET deleted = 1 WHERE id IN (${placeholders})`).run(...superseded);
+        }
+      }
+      return { id, superseded };
     });
 
-    const id = insert();
+    const { id, superseded } = tx();
     const row = this.db.prepare(`SELECT * FROM documents WHERE id = ?`).get(id) as RawDocRow;
-    return parseRow(row);
+    return { document: parseRow(row), superseded };
+  }
+
+  /** Insert/replace the FTS and vector rows for a document id. */
+  private syncSearchIndexes(id: number, fullText: string, docType: string | null, embedding: Buffer): void {
+    this.db.prepare(`DELETE FROM documents_fts WHERE rowid = ?`).run(id);
+    this.db
+      .prepare(`INSERT INTO documents_fts (rowid, full_text, doc_type) VALUES (?, ?, ?)`)
+      .run(id, fullText, docType ?? "");
+    // sqlite-vec's vec0 requires a BigInt for the integer primary key.
+    this.db.prepare(`DELETE FROM documents_vec WHERE document_id = ?`).run(BigInt(id));
+    this.db.prepare(`INSERT INTO documents_vec (document_id, embedding) VALUES (?, ?)`).run(BigInt(id), embedding);
+  }
+
+  /** Remove a document's search-index rows (used on hard delete). */
+  private dropSearchIndexes(id: number): void {
+    this.db.prepare(`DELETE FROM documents_fts WHERE rowid = ?`).run(id);
+    this.db.prepare(`DELETE FROM documents_vec WHERE document_id = ?`).run(BigInt(id));
   }
 
   /** Scope-checked fetch by id (respects lifecycle filter unless overridden). */
@@ -181,6 +231,138 @@ export class DocumentStore {
       )
       .get(...params) as RawDocRow | undefined;
     return row ? parseRow(row) : null;
+  }
+
+  /**
+   * Fetch a document for mutation: readable-scope checked, but ignoring the
+   * lifecycle filter (so expired/deleted rows can be previewed, corrected, or
+   * restored). The caller must additionally hold write permission on its scope.
+   */
+  getForMutation(principal: Principal, id: number): DocumentRow {
+    const scopes = resolveReadScopes(principal);
+    const placeholders = scopes.map(() => "?").join(",");
+    const row = this.db
+      .prepare(`SELECT * FROM documents WHERE id = ? AND scope IN (${placeholders})`)
+      .get(id, ...scopes) as RawDocRow | undefined;
+    if (!row) throw new NotFoundError();
+    // Must be permitted to write the document's current scope.
+    resolveWriteScope(principal, row.scope as Scope);
+    return parseRow(row);
+  }
+
+  /** Apply a partial update. Re-embeds and re-indexes when full_text changes. */
+  async update(principal: Principal, id: number, patch: UpdatePatch): Promise<DocumentRow> {
+    const current = this.getForMutation(principal, id);
+
+    const next: DocumentRow = { ...current };
+    if (patch.full_text !== undefined) {
+      const t = patch.full_text.trim();
+      if (t.length === 0) throw new ValidationError("full_text cannot be empty");
+      next.full_text = t;
+    }
+    if (patch.scope !== undefined) next.scope = resolveWriteScope(principal, patch.scope);
+    if (patch.valid_until !== undefined) {
+      if (!DATE_RE.test(patch.valid_until)) {
+        throw new ValidationError(`valid_until must be 'YYYY-MM-DD' (or ${NO_EXPIRY})`);
+      }
+      next.valid_until = patch.valid_until;
+    }
+    if (patch.extracted !== undefined) {
+      if (typeof patch.extracted !== "object" || patch.extracted === null) {
+        throw new ValidationError("extracted must be a JSON object");
+      }
+      next.extracted = patch.extracted;
+    }
+    if (patch.doc_type !== undefined) next.doc_type = patch.doc_type;
+    if (patch.source_type !== undefined) next.source_type = patch.source_type;
+    if (patch.raw_path !== undefined) next.raw_path = patch.raw_path;
+    if (patch.deleted !== undefined) next.deleted = patch.deleted;
+    if (patch.dedup_key !== undefined) next.dedup_key = patch.dedup_key;
+
+    const reembed = patch.full_text !== undefined;
+    const embedding = reembed ? vecBlob(await this.embedder.embed(next.full_text)) : null;
+
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE documents SET source_type=@source_type, raw_path=@raw_path, full_text=@full_text,
+             doc_type=@doc_type, extracted=@extracted, scope=@scope, valid_until=@valid_until,
+             deleted=@deleted, dedup_key=@dedup_key
+           WHERE id=@id`,
+        )
+        .run({
+          id,
+          source_type: next.source_type,
+          raw_path: next.raw_path,
+          full_text: next.full_text,
+          doc_type: next.doc_type,
+          extracted: JSON.stringify(next.extracted),
+          scope: next.scope,
+          valid_until: next.valid_until,
+          deleted: next.deleted ? 1 : 0,
+          dedup_key: next.dedup_key,
+        });
+      if (reembed && embedding) this.syncSearchIndexes(id, next.full_text, next.doc_type, embedding);
+      else this.db.prepare(`UPDATE documents_fts SET doc_type = ? WHERE rowid = ?`).run(next.doc_type ?? "", id);
+    });
+    tx();
+    return parseRow(this.db.prepare(`SELECT * FROM documents WHERE id = ?`).get(id) as RawDocRow);
+  }
+
+  /** Logical delete (manual archive, §4). Reversible via restore(). */
+  softDelete(principal: Principal, id: number): DocumentRow {
+    this.getForMutation(principal, id); // scope + write check
+    this.db.prepare(`UPDATE documents SET deleted = 1 WHERE id = ?`).run(id);
+    return parseRow(this.db.prepare(`SELECT * FROM documents WHERE id = ?`).get(id) as RawDocRow);
+  }
+
+  /** Un-delete a logically deleted document. */
+  restore(principal: Principal, id: number): DocumentRow {
+    this.getForMutation(principal, id);
+    this.db.prepare(`UPDATE documents SET deleted = 0 WHERE id = ?`).run(id);
+    return parseRow(this.db.prepare(`SELECT * FROM documents WHERE id = ?`).get(id) as RawDocRow);
+  }
+
+  /** Physical delete (irreversible). Reserved for "truly remove this" (§4). */
+  hardDelete(principal: Principal, id: number): { id: number } {
+    this.getForMutation(principal, id);
+    const tx = this.db.transaction(() => {
+      this.dropSearchIndexes(id);
+      this.db.prepare(`DELETE FROM documents WHERE id = ?`).run(id);
+    });
+    tx();
+    return { id };
+  }
+
+  /**
+   * Documents expiring within `withinDays` (today .. today+N), across all
+   * scopes. Intended for the server-side reminder cron, not user requests.
+   */
+  findUpcomingExpiries(withinDays: number, from: Date = new Date()): UpcomingExpiry[] {
+    const today = todayLocal(from);
+    const until = new Date(from);
+    until.setDate(until.getDate() + withinDays);
+    const untilStr = todayLocal(until);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM documents
+         WHERE deleted = 0 AND valid_until >= ? AND valid_until <= ? AND valid_until <> ?
+         ORDER BY valid_until ASC`,
+      )
+      .all(today, untilStr, NO_EXPIRY) as RawDocRow[];
+    const todayMs = Date.parse(today + "T00:00:00Z");
+    return rows.map((raw) => {
+      const doc = parseRow(raw);
+      const daysLeft = Math.round((Date.parse(doc.valid_until + "T00:00:00Z") - todayMs) / 86400000);
+      return {
+        id: doc.id,
+        doc_type: doc.doc_type,
+        scope: doc.scope,
+        valid_until: doc.valid_until,
+        snippet: toSnippet(doc.full_text),
+        days_left: daysLeft,
+      };
+    });
   }
 
   /** Search with scope enforcement and the default lifecycle filter. */

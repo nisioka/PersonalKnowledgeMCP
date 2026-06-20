@@ -2,108 +2,86 @@
 
 A household knowledge base exposed to Claude over MCP. Store family/household
 information (warranties, school letters, municipal notices, contacts, life log,
-…) and let Claude search and register it, so suggestions can be grounded in your
-actual household context.
+…), let Claude search and register it, ingest documents via Discord with OCR, and
+get proactive reminders before things expire — so suggestions are grounded in
+your actual household context.
 
-The full system design is in [`docs/design.md`](docs/design.md). This repository
-currently implements **Phase 1: the LAN-only minimal foundation**.
+The full system design is in [`docs/design.md`](docs/design.md). All four roadmap
+phases (design §8) are implemented; the components that touch external services
+(Discord, Cloudflare, Google Drive, Anthropic) need credentials to run, but the
+code, tests, config, and deployment units are all here.
 
-## Status — Phase 1 (implemented)
+## What's implemented
 
-Per the roadmap in design §8, Phase 1 covers:
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | Schema, permission guard, MCP server (`register`/`search`), LAN-reachable | ✅ |
+| 2 | Discord ingestion, PaddleOCR + Anthropic extraction, externalized prompts, `update`/`delete`/`restore` + dedup, encrypted Google Drive backup | ✅ |
+| 3 | Cloudflare Tunnel + Access (email→scope header mapping), per-route tokens | ✅ |
+| 4 | Audit logging, destructive-op confirmation flow, proactive expiry reminders, doc_type vocabulary | ✅ |
 
-1. **Schema** — `documents` table with `scope`, `valid_until`, `deleted`, an FTS5
-   keyword index, and a `sqlite-vec` vector table.
-2. **Permission guard** — a single choke point (`src/auth/guard.ts`) that derives
-   allowed scopes from the caller's token and forces `scope IN (...)` into every
-   query. The default search lifecycle filter is `deleted = 0 AND valid_until >= today`.
-3. **MCP server** — a Streamable HTTP server exposing two tools, `register` and
-   `search`, with server-side scope enforcement.
-4. **LAN reachable** — verified end to end by an MCP client over HTTP (see tests).
-
-Not yet built (later phases): Discord ingestion + OCR (Phase 2), `update` tool &
-deduplication (Phase 2), Google Drive backup (Phase 2), Cloudflare Tunnel/Access
-exposure (Phase 3), proactive reminders (Phase 4). A real embedding model also
-replaces the Phase-1 placeholder (see below).
-
-## Architecture (Phase 1)
+## Architecture
 
 ```
-Claude (Code CLI / Web / app)
-        │  Streamable HTTP + Bearer token
-        ▼
-  Express  POST /mcp           src/index.ts      ← authenticate, per-request MCP server
-        │
-  MCP tools: register, search  src/mcp/server.ts
-        │
-  Permission guard             src/auth/guard.ts ← token → allowed scopes (never trusts client)
-        │
-  DocumentStore                src/store/        ← scope-enforced SQL, FTS + vector + hybrid
-        │
-  SQLite + FTS5 + sqlite-vec   src/db/           ← documents, documents_fts, documents_vec
+Ingestion                         Knowledge Store                 Retrieval / Reasoning
+─────────                         ───────────────                 ─────────────────────
+Discord bot ─ OCR+extract ─┐                                      Claude (Code / Web / app)
+(src/ingest, python/)      ├─►  DocumentStore  ─► SQLite + FTS5         │ Streamable HTTP
+MCP register tool ─────────┘    (src/store)       + sqlite-vec          ▼
+                                   ▲  scope-enforced SQL          Express POST /mcp (src/index.ts)
+                                   │                                 │ authenticate (token | CF Access)
+Permission guard (src/auth) ───────┘                                ▼
+                                                                  MCP tools (src/mcp): register,
+Reminders cron ─► Discord webhook (src/reminders)                 search, update, delete, restore,
+Backup cron ─► encrypted → Google Drive (src/backup)              list_doc_types
 ```
 
-### Search
-
-- `keyword` (default) — FTS5 with the **trigram** tokenizer, so substring search
-  works for Japanese and English alike (queries must be ≥ 3 characters to match).
-- `vector` — KNN over `sqlite-vec`.
-- `hybrid` — Reciprocal Rank Fusion of the two.
-
-### Embeddings — placeholder
-
-Phase 1 ships a deterministic, offline `HashingEmbedder` so the vector pipeline
-runs with no API key. It captures lexical overlap but **not real semantics**;
-keyword search is the reliable default. Swap in a real embedder by implementing
-the `Embedder` interface (`src/embedding.ts`) and wiring it in `createApp`.
+Design principles enforced in code: a **single DB** split logically by `scope`;
+**authorization decided server-side by the token** (clients never pick their own
+scope); **raw text + extracted JSON kept together**; lifecycle handled by a
+**date filter** (`valid_until`) rather than status cron.
 
 ## Setup
 
-Requires Node.js ≥ 22.
+Requires Node.js ≥ 22 (and Python 3.10+ for OCR).
 
 ```bash
 npm install
-npm run build      # compile to dist/
-npm test           # run the vitest suite
+npm run build
+npm test          # 52 tests
+cp .env.example .env   # then edit
 ```
 
-Run the server:
+Run the MCP server:
 
 ```bash
-# Dev (built-in DEV tokens, loopback only)
-npm run dev
-
-# Production-ish
+npm run dev            # dev (DEV tokens, loopback)
 npm run build && npm start
 ```
 
-Configuration is via environment variables (see [`.env.example`](.env.example)):
-
-| Var | Default | Meaning |
+| Component | Command | Needs |
 |---|---|---|
-| `PK_HOST` | `127.0.0.1` | Bind address. Set `0.0.0.0` for LAN access. |
-| `PK_PORT` | `8848` | Listen port. |
-| `PK_DB_PATH` | `data/knowledge.db` | SQLite store path (created if missing). |
-| `PK_EMBEDDING_DIM` | `256` | Vector dimension (fixed at DB creation). |
-| `PK_TOKENS` | *(dev tokens)* | JSON token → principal registry. |
+| MCP server | `npm start` | — (DEV tokens for LAN) |
+| Discord bot | `npm run discord` | `DISCORD_TOKEN` |
+| OCR/extract service | `uvicorn ingest_service:app` (in `python/`) | PaddleOCR; `ANTHROPIC_API_KEY` for extraction |
+| Backup | `npm run backup` | `PK_BACKUP_PASSPHRASE`, `PK_BACKUP_FOLDER_ID`, Google creds |
+| Restore | `npm run restore [path]` | same |
+| Reminders | `npm run reminders` | `PK_REMINDER_WEBHOOK` (optional) |
 
-When `PK_TOKENS` is unset, built-in **DEV** tokens are used for LAN bring-up:
-`full-dev-token`, `work-dev-token`, `family-dev-token`. Replace these before
-exposing the server beyond your local network.
+All configuration is via environment variables — see [`.env.example`](.env.example).
 
-`PK_TOKENS` example (`shared` is added to every principal automatically):
+## MCP tools
 
-```json
-{
-  "<full-secret>":   { "name": "full",   "scopes": ["private", "work", "shared"], "defaultWriteScope": "private" },
-  "<work-secret>":   { "name": "work",   "scopes": ["work", "shared"] },
-  "<family-secret>": { "name": "family", "scopes": ["shared"] }
-}
-```
+| Tool | Purpose | Notes |
+|---|---|---|
+| `register` | Store knowledge | `dedup_key` supersedes prior versions (skipped for history doc_types) |
+| `search` | Search | `keyword` (default, trigram FTS — JP/EN substring, ≥3 chars), `vector`, `hybrid`; `include_expired` for history |
+| `update` | Overwrite fields | **Destructive**: returns a preview unless `confirm: true` (§9.4) |
+| `delete` | Archive or remove | `mode: soft` (default, reversible) / `hard`; preview unless `confirm: true` |
+| `restore` | Un-archive | reverses a soft delete |
+| `list_doc_types` | Vocabulary | keeps doc_type spelling convergent (§9.5) |
 
-## Connecting from Claude Code
-
-Add it as a remote MCP server (adjust host/port/token):
+### Connecting from Claude Code (LAN)
 
 ```bash
 claude mcp add --transport http personal-knowledge \
@@ -111,61 +89,85 @@ claude mcp add --transport http personal-knowledge \
   --header "Authorization: Bearer full-dev-token"
 ```
 
-Then ask Claude to `register` knowledge or `search` it. A quick health check:
+### Lifecycle & dedup
 
-```bash
-curl http://SERVER-IP:8848/health
-```
+- `valid_until` (date) drives expiry; the sentinel `9999-12-31` means "no expiry".
+  Default search returns only `deleted = 0 AND valid_until >= today`.
+- `deleted` is a manual archive flag, orthogonal to expiry.
+- `dedup_key` lets an update of a "latest-only" fact (a phone number, current
+  plan) supersede the previous version, while history doc_types (each year's tax
+  amount) are never superseded.
 
-## Tools
+### Embeddings — placeholder
 
-### `register`
-Stores a document. Raw text is always kept alongside extracted metadata.
+A deterministic, offline `HashingEmbedder` runs the vector pipeline with no API
+key; it captures lexical overlap, not real semantics, so keyword search is the
+reliable default. Implement the `Embedder` interface (`src/embedding.ts`) to plug
+in a real model.
 
-| Field | Required | Notes |
-|---|---|---|
-| `full_text` | ✓ | The text to store. |
-| `scope` | | Authorized against your token; defaults to the token's default write scope. |
-| `doc_type` | | e.g. `保証書`, `学校手紙`. |
-| `valid_until` | | `YYYY-MM-DD`; omit for no expiry (`9999-12-31`). |
-| `extracted` | | Arbitrary JSON metadata object. |
-| `raw_path` | | Path to an original file, if any. |
-| `source_type` | | Ingestion path; defaults to `mcp`. |
+## Document ingestion (Discord + OCR)
 
-### `search`
-Searches stored knowledge. Returns only non-deleted, non-expired documents in
-scopes your token can read, unless overridden.
+1. Start the Python service (`python/ingest_service.py`) — PaddleOCR for
+   image/PDF → text, Anthropic for text → structured metadata using the
+   per-`doc_type` prompts in [`prompts/`](prompts/).
+2. Start the Discord bot (`npm run discord`) and drop an image/PDF (or text) into
+   a watched channel. The bot OCRs, extracts, saves the original under
+   `PK_FILES_DIR`, and registers the document into the same store the MCP server
+   reads. It replies with the id / doc_type / expiry.
 
-| Field | Required | Notes |
-|---|---|---|
-| `query` | ✓ | Free text (≥ 3 chars for keyword matching). |
-| `mode` | | `keyword` (default), `vector`, `hybrid`. |
-| `scopes` | | Restrict scopes (intersected with your token). |
-| `doc_type` | | Restrict to one type. |
-| `include_expired` | | Include expired docs for history lookups. |
-| `limit` | | Max results (default 10). |
+If `PK_INGEST_URL` is unset the bot still stores raw text (no OCR).
+
+## External exposure (Cloudflare)
+
+Put the LAN server behind a Cloudflare Tunnel + Access (no open ports, home IP
+hidden) — see [`deploy/cloudflared-config.example.yml`](deploy/cloudflared-config.example.yml).
+Access injects `Cf-Access-Authenticated-User-Email`; set
+`PK_TRUST_ACCESS_HEADER=true` and `PK_ACCESS_EMAILS` to map authenticated emails
+to scopes. Register the public URL as a custom connector on claude.ai (Web), and
+it syncs to the mobile app.
+
+## Backup & reminders
+
+- **Backup** (§9.2): SQLite only, WAL-safe online snapshot, AES-256-GCM encrypted
+  (scrypt-derived key) *before* upload to Google Drive. Original files are not
+  backed up by design — `full_text` keeps documents searchable after a restore.
+- **Reminders** (§4): a daily scan posts items expiring within
+  `PK_REMINDER_DAYS` to a Discord webhook.
+
+Both are one-shot CLIs meant for system cron — `systemd` service+timer units are
+in [`deploy/systemd/`](deploy/systemd/).
 
 ## Security notes
 
-- The server **never trusts a client-supplied scope**; it is always intersected
-  with the token's allowed set, and writes outside that set are rejected.
+- The server **never trusts a client-supplied scope**; it's intersected with the
+  token's allowed set, and out-of-scope writes are rejected.
 - `shared` knowledge is visible to every token that permits it.
-- Authenticated requests are audit-logged (`src/audit.ts`).
-- The default bind is loopback; LAN/Tunnel exposure is opt-in (design §6–§7).
+- Destructive operations require explicit `confirm: true` (§9.4).
+- Every authenticated request is audit-logged (`src/audit.ts`).
+- The CF Access email header is honored only when `PK_TRUST_ACCESS_HEADER=true`,
+  so it can't be spoofed on the LAN.
+- Data (SQLite, files) stays on the home server; only tool responses leave it.
 
 ## Project layout
 
 ```
 src/
-  config.ts         token → principal registry, runtime config
-  types.ts          domain types
-  audit.ts          one-line audit logging
-  embedding.ts      Embedder interface + Phase-1 hashing placeholder
-  auth/guard.ts     permission guard (the authorization choke point)
-  db/index.ts       SQLite + FTS5 + sqlite-vec schema/open
-  store/documents.ts scope-enforced register/search/get
-  mcp/server.ts     register & search MCP tools
-  index.ts          Express + Streamable HTTP entrypoint
-test/               guard, store, config, and HTTP end-to-end tests
-docs/design.md      full system design
+  config.ts            token/email → principal registry, runtime config
+  types.ts             domain types
+  audit.ts             one-line audit logging
+  embedding.ts         Embedder interface + Phase-1 hashing placeholder
+  auth/guard.ts        permission guard + request principal resolution
+  db/index.ts          SQLite + FTS5 (trigram) + sqlite-vec schema
+  doctype/registry.ts  doc_type vocabulary + history rules
+  store/documents.ts   scope-enforced register/search/update/delete/restore + reminders
+  mcp/server.ts        MCP tools (register/search/update/delete/restore/list_doc_types)
+  index.ts            Express + Streamable HTTP entrypoint
+  ingest/              Discord bot + OCR/extraction HTTP client
+  backup/              AES-256-GCM crypto, Drive backup/restore, CLI
+  reminders/           expiry scan → Discord, CLI
+python/                FastAPI OCR (PaddleOCR) + extraction (Anthropic) service
+prompts/               externalized per-doc_type extraction prompts
+deploy/                Cloudflare Tunnel config + systemd units/timers
+test/                  guard, store, config, backup, reminder, and HTTP e2e tests
+docs/design.md         full system design
 ```
