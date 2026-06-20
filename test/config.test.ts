@@ -32,4 +32,14 @@ describe("loadConfig", () => {
       }),
     ).toThrow();
   });
+
+  it("fails closed when PK_TOKENS is set but empty (no silent dev-token fallback)", () => {
+    expect(() => loadConfig({ PK_TOKENS: "" })).toThrow();
+    expect(() => loadConfig({ PK_TOKENS: "   " })).toThrow();
+  });
+
+  it("rejects an out-of-range PK_PORT", () => {
+    expect(() => loadConfig({ PK_PORT: "70000" })).toThrow();
+    expect(() => loadConfig({ PK_PORT: "abc" })).toThrow();
+  });
 });

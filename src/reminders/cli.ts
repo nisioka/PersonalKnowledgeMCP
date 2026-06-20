@@ -17,7 +17,11 @@ async function main(): Promise<void> {
   const db = openDatabase(config.dbPath, { embeddingDim: config.embedding.dimension });
   try {
     const store = new DocumentStore(db, new HashingEmbedder(config.embedding.dimension));
-    const days = process.env.PK_REMINDER_DAYS ? Number(process.env.PK_REMINDER_DAYS) : 14;
+    const rawDays = process.env.PK_REMINDER_DAYS;
+    const days = rawDays === undefined ? 14 : Number(rawDays);
+    if (!Number.isInteger(days) || days < 0) {
+      throw new Error(`PK_REMINDER_DAYS must be an integer >= 0, got "${rawDays}"`);
+    }
     const result = await runReminders(store, days, process.env.PK_REMINDER_WEBHOOK);
     process.stdout.write(`[reminders] ${result.count} upcoming, posted=${result.posted}\n`);
   } finally {

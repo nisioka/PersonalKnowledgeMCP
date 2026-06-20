@@ -33,6 +33,14 @@ export class NotFoundError extends Error {
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SNIPPET_LEN = 600;
 
+/** Format check PLUS calendar validity (rejects e.g. 2026-02-31). */
+function isValidYmd(value: string): boolean {
+  if (!DATE_RE.test(value)) return false;
+  const [y, m, d] = value.split("-").map(Number) as [number, number, number];
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
 export class ValidationError extends Error {
   constructor(message: string) {
     super(message);
@@ -146,8 +154,8 @@ export class DocumentStore {
     const scope = resolveWriteScope(principal, input.scope);
 
     const validUntil = input.valid_until ?? NO_EXPIRY;
-    if (!DATE_RE.test(validUntil)) {
-      throw new ValidationError(`valid_until must be 'YYYY-MM-DD' (or omit for ${NO_EXPIRY})`);
+    if (!isValidYmd(validUntil)) {
+      throw new ValidationError(`valid_until must be a real 'YYYY-MM-DD' date (or omit for ${NO_EXPIRY})`);
     }
 
     if (input.extracted !== undefined && (typeof input.extracted !== "object" || input.extracted === null)) {
@@ -266,8 +274,8 @@ export class DocumentStore {
     }
     if (patch.scope !== undefined) next.scope = resolveWriteScope(principal, patch.scope);
     if (patch.valid_until !== undefined) {
-      if (!DATE_RE.test(patch.valid_until)) {
-        throw new ValidationError(`valid_until must be 'YYYY-MM-DD' (or ${NO_EXPIRY})`);
+      if (!isValidYmd(patch.valid_until)) {
+        throw new ValidationError(`valid_until must be a real 'YYYY-MM-DD' date (or ${NO_EXPIRY})`);
       }
       next.valid_until = patch.valid_until;
     }

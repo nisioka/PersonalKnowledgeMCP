@@ -93,10 +93,15 @@ function parseTokens(json: string): Map<string, Principal> {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
-  const usingDevTokens = !env.PK_TOKENS;
-  const tokens = usingDevTokens
-    ? new Map(Object.entries(DEV_TOKENS))
-    : parseTokens(env.PK_TOKENS as string);
+  // Fail closed: only a completely unset PK_TOKENS falls back to DEV tokens. An
+  // empty/whitespace value (e.g. a failed secret injection) must NOT silently
+  // bypass auth — it errors loudly.
+  const rawTokens = env.PK_TOKENS;
+  const usingDevTokens = rawTokens === undefined;
+  if (rawTokens !== undefined && rawTokens.trim().length === 0) {
+    throw new Error("PK_TOKENS is set but empty");
+  }
+  const tokens = usingDevTokens ? new Map(Object.entries(DEV_TOKENS)) : parseTokens(rawTokens);
 
   // PK_ACCESS_EMAILS reuses the same principal shape, keyed by email.
   const accessEmails = env.PK_ACCESS_EMAILS
@@ -110,11 +115,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(`PK_EMBEDDING_DIM must be a positive integer, got "${env.PK_EMBEDDING_DIM}"`);
   }
 
+  const port = env.PK_PORT ? Number(env.PK_PORT) : 8848;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`PK_PORT must be an integer between 1 and 65535, got "${env.PK_PORT}"`);
+  }
+
   return {
     // Default to loopback so an unconfigured server is not exposed by accident.
     // Set PK_HOST=0.0.0.0 to accept LAN connections (see design §5).
     host: env.PK_HOST ?? "127.0.0.1",
-    port: env.PK_PORT ? Number(env.PK_PORT) : 8848,
+    port,
     dbPath: env.PK_DB_PATH ?? "data/knowledge.db",
     tokens,
     usingDevTokens,

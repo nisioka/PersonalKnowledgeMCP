@@ -19,6 +19,8 @@ const config: AppConfig = {
     ["family-token", family],
   ]),
   usingDevTokens: false,
+  accessEmails: new Map(),
+  trustAccessHeader: false,
   embedding: { dimension: 256 },
 };
 

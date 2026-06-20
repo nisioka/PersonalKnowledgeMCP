@@ -6,9 +6,9 @@
  * important originals are kept by hand. The snapshot is taken via SQLite's
  * online backup API (WAL-safe) and encrypted before upload.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import Database from "better-sqlite3";
 import { google } from "googleapis";
@@ -72,7 +72,8 @@ export async function runBackup(config: BackupConfig, now = new Date()): Promise
 export async function runRestore(config: BackupConfig, targetPath: string): Promise<string> {
   const drive = driveClient(config.credentialsPath);
   const list = await drive.files.list({
-    q: `'${config.folderId}' in parents and name contains 'knowledge-' and trashed = false`,
+    // Match only our encrypted backups, not any file containing 'knowledge-'.
+    q: `'${config.folderId}' in parents and name contains 'knowledge-' and name contains '.db.enc' and trashed = false`,
     orderBy: "createdTime desc",
     pageSize: 1,
     fields: "files(id,name)",
@@ -84,7 +85,11 @@ export async function runRestore(config: BackupConfig, targetPath: string): Prom
     { responseType: "arraybuffer" },
   );
   const plaintext = decrypt(Buffer.from(res.data as ArrayBuffer), config.passphrase);
-  writeFileSync(targetPath, plaintext);
+  // Write to a temp file then atomically rename, so a mid-write failure cannot
+  // leave a truncated/corrupt database at targetPath.
+  const tmp = join(dirname(targetPath), `.restore-${process.pid}-${Date.now()}.tmp`);
+  writeFileSync(tmp, plaintext);
+  renameSync(tmp, targetPath);
   return file.name ?? file.id;
 }
 

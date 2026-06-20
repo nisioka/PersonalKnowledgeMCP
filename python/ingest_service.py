@@ -26,6 +26,8 @@ from pydantic import BaseModel
 PROMPTS_DIR = Path(os.environ.get("PK_PROMPTS_DIR", Path(__file__).resolve().parent.parent / "prompts"))
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 NO_EXPIRY = "9999-12-31"
+# Cap upload size to avoid memory-exhaustion DoS (default 25 MiB).
+MAX_UPLOAD_BYTES = int(os.environ.get("PK_MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
 
 # Mirror of the TypeScript DocTypeRegistry default vocabulary (design §9.5).
 DEFAULT_DOC_TYPES = [
@@ -84,11 +86,15 @@ def ocr_file(data: bytes, filename: str, content_type: str | None) -> str:
 
 # -------------------------------------------------------------------- extraction
 def _load_prompt(doc_type_hint: str | None) -> str:
+    root = PROMPTS_DIR.resolve()
     if doc_type_hint:
-        candidate = PROMPTS_DIR / f"{doc_type_hint}.md"
-        if candidate.exists():
+        # Use only the basename and confirm the resolved path stays under root,
+        # so a hint like "../../etc/passwd" cannot escape the prompts directory.
+        safe_name = Path(f"{doc_type_hint}.md").name
+        candidate = (root / safe_name).resolve()
+        if candidate.is_file() and candidate.is_relative_to(root):
             return candidate.read_text(encoding="utf-8")
-    return (PROMPTS_DIR / "default.md").read_text(encoding="utf-8")
+    return (root / "default.md").read_text(encoding="utf-8")
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
@@ -139,6 +145,14 @@ def health() -> dict[str, Any]:
     return {"ok": True, "model": ANTHROPIC_MODEL, "extraction": bool(os.environ.get("ANTHROPIC_API_KEY"))}
 
 
+async def _read_limited(file: UploadFile) -> bytes:
+    # Read up to the limit (+1 byte to detect overflow) without buffering more.
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"file exceeds {MAX_UPLOAD_BYTES} bytes")
+    return data
+
+
 def _safe_ocr(data: bytes, filename: str, content_type: str | None) -> str:
     # PaddleOCR/PaddlePaddle are NOT thread-safe; serialize OCR calls so
     # concurrent requests cannot segfault the process.
@@ -148,7 +162,7 @@ def _safe_ocr(data: bytes, filename: str, content_type: str | None) -> str:
 
 @app.post("/ocr")
 async def ocr_endpoint(file: UploadFile = File(...)) -> dict[str, str]:
-    data = await file.read()
+    data = await _read_limited(file)
     loop = asyncio.get_running_loop()
     # OCR is heavy and synchronous; run it off the event loop so health checks
     # and other requests stay responsive.
@@ -166,7 +180,7 @@ async def extract_endpoint(req: ExtractRequest) -> dict[str, Any]:
 
 @app.post("/ingest")
 async def ingest_endpoint(file: UploadFile = File(...), doc_type_hint: str | None = Form(default=None)) -> dict[str, Any]:
-    data = await file.read()
+    data = await _read_limited(file)
     loop = asyncio.get_running_loop()
     full_text = await loop.run_in_executor(None, _safe_ocr, data, file.filename or "upload", file.content_type)
     result = await loop.run_in_executor(None, extract_metadata, full_text, doc_type_hint)

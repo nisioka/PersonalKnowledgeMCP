@@ -9,23 +9,38 @@
 import type { DocumentStore } from "../store/documents.js";
 import type { UpcomingExpiry } from "../types.js";
 
+// Discord caps webhook `content` at 2000 chars; stay safely under it.
+const DISCORD_CONTENT_LIMIT = 1900;
+
 /** Format a reminder digest, or null when nothing is upcoming. */
 export function formatReminder(items: UpcomingExpiry[], withinDays: number): string | null {
   if (items.length === 0) return null;
-  const lines = items.map((it) => {
+  const header = `📌 ${withinDays}日以内に期限を迎える項目が ${items.length} 件あります:`;
+  const lines: string[] = [];
+  let length = header.length;
+  let shown = 0;
+  for (const it of items) {
     const when = it.days_left === 0 ? "今日" : `あと${it.days_left}日`;
     const type = it.doc_type ? `[${it.doc_type}] ` : "";
-    return `• ${when}（${it.valid_until}）${type}${it.snippet.slice(0, 80)}`;
-  });
-  return `📌 ${withinDays}日以内に期限を迎える項目が ${items.length} 件あります:\n${lines.join("\n")}`;
+    const line = `• ${when}（${it.valid_until}）${type}${it.snippet.slice(0, 80)}`;
+    if (length + line.length + 1 > DISCORD_CONTENT_LIMIT) break;
+    lines.push(line);
+    length += line.length + 1;
+    shown++;
+  }
+  const omitted = items.length - shown;
+  if (omitted > 0) lines.push(`…ほか ${omitted} 件`);
+  return `${header}\n${lines.join("\n")}`;
 }
 
-/** POST a plain message to a Discord webhook. */
+/** POST a plain message to a Discord webhook (mentions disabled, with timeout). */
 export async function postToDiscord(webhookUrl: string, content: string): Promise<void> {
   const res = await fetch(webhookUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ content }),
+    // Disable mention parsing so externally-sourced snippet text can't ping @everyone.
+    body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) {
     throw new Error(`Discord webhook failed: ${res.status} ${await res.text()}`);

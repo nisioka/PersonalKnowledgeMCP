@@ -130,12 +130,12 @@ Access injects `Cf-Access-Authenticated-User-Email`; set
 to scopes. Register the public URL as a custom connector on claude.ai (Web), and
 it syncs to the mobile app.
 
-**Transport note (known limitation):** the server runs Streamable HTTP in
-*stateless* mode and returns `405` on `GET /mcp`. This works for Claude Code's
-HTTP POST. Some remote-MCP clients open a `GET` SSE stream for server→client
-messages and would need *stateful* session management (session id + GET stream)
-— not yet implemented. To be wired up alongside the actual Phase 3 external
-rollout if a target client requires it.
+**Transport note:** the server runs Streamable HTTP in *stateless* mode and
+returns `405` on `GET /mcp`. This is spec-compliant — the MCP Streamable HTTP
+spec says a server MUST either return `text/event-stream` on GET **or** `405`
+when it doesn't offer a server→client stream, and compliant clients fall back to
+POST. Anthropic's remote connectors use Streamable HTTP (legacy HTTP+SSE is
+deprecated), so no separate SSE transport is needed.
 
 ## Backup & reminders
 

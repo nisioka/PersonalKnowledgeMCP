@@ -63,7 +63,8 @@ export function resolvePrincipal(req: RequestAuth, config: AuthConfig): Principa
 
   if (config.trustAccessHeader && req.accessEmail) {
     const principal = config.accessEmails.get(req.accessEmail.toLowerCase());
-    if (!principal) throw new AuthError(`no scope mapping for ${req.accessEmail}`, 403);
+    // Don't echo the email back to clients/logs (PII).
+    if (!principal) throw new AuthError("no scope mapping for authenticated user", 403);
     return principal;
   }
   throw new AuthError("missing bearer token", 401);

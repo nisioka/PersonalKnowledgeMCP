@@ -18,22 +18,34 @@ export interface IngestClient {
   extractText(fullText: string, docTypeHint?: string | null): Promise<IngestResult>;
 }
 
+/** OCR can be slow but must not hang ingestion forever. */
+const INGEST_TIMEOUT_MS = 60_000;
+
 export class HttpIngestClient implements IngestClient {
   constructor(private readonly baseUrl: string) {}
+
+  private url(path: string): string {
+    return `${this.baseUrl.replace(/\/$/, "")}${path}`;
+  }
 
   async ingestFile(buffer: Buffer, filename: string, mimeType: string): Promise<IngestResult> {
     const form = new FormData();
     form.append("file", new Blob([buffer], { type: mimeType }), filename);
-    const res = await fetch(`${this.baseUrl.replace(/\/$/, "")}/ingest`, { method: "POST", body: form });
+    const res = await fetch(this.url("/ingest"), {
+      method: "POST",
+      body: form,
+      signal: AbortSignal.timeout(INGEST_TIMEOUT_MS),
+    });
     if (!res.ok) throw new Error(`ingest service /ingest failed: ${res.status} ${await res.text()}`);
     return (await res.json()) as IngestResult;
   }
 
   async extractText(fullText: string, docTypeHint?: string | null): Promise<IngestResult> {
-    const res = await fetch(`${this.baseUrl.replace(/\/$/, "")}/extract`, {
+    const res = await fetch(this.url("/extract"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ full_text: fullText, doc_type_hint: docTypeHint ?? null }),
+      signal: AbortSignal.timeout(INGEST_TIMEOUT_MS),
     });
     if (!res.ok) throw new Error(`ingest service /extract failed: ${res.status} ${await res.text()}`);
     return (await res.json()) as IngestResult;

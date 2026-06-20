@@ -18,6 +18,7 @@ import { DocTypeRegistry } from "./doctype/registry.js";
 import { AuthError, resolvePrincipal } from "./auth/guard.js";
 import { buildServer } from "./mcp/server.js";
 import { audit } from "./audit.js";
+import { SERVER_NAME, VERSION } from "./version.js";
 
 function jsonRpcError(res: Response, status: number, message: string): void {
   res.status(status).json({
@@ -36,7 +37,7 @@ export function createApp(config: AppConfig = loadConfig()): { app: Express; db:
   app.use(express.json({ limit: "10mb" }));
 
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, name: "personal-knowledge-mcp", version: "0.1.0" });
+    res.json({ ok: true, name: SERVER_NAME, version: VERSION });
   });
 
   app.post("/mcp", async (req: Request, res: Response) => {

@@ -1,7 +1,7 @@
 # OCR + structure extraction service (design §3). Python 3.10+.
 fastapi>=0.115
 uvicorn[standard]>=0.30
-python-multipart>=0.0.9
+python-multipart>=0.0.30        # >=0.0.30 fixes CVE-2026-53538/53537 and earlier DoS/traversal CVEs
 pillow>=10.0
 pdf2image>=1.17          # requires poppler-utils on the system
 paddleocr>=2.7

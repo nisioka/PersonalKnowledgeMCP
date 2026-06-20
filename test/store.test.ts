@@ -46,6 +46,12 @@ describe("DocumentStore", () => {
     ).rejects.toThrow(ValidationError);
   });
 
+  it("rejects impossible calendar dates in valid_until", async () => {
+    await expect(
+      store.register(full, { full_text: "x", valid_until: "2026-02-31" }),
+    ).rejects.toThrow(ValidationError);
+  });
+
   it("enforces write scope authorization", async () => {
     await expect(store.register(family, { full_text: "x", scope: "private" })).rejects.toThrow(AuthError);
   });

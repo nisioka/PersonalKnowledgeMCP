@@ -17,6 +17,7 @@ import { DocumentStore, NotFoundError, ValidationError } from "../store/document
 import { DocTypeRegistry } from "../doctype/registry.js";
 import { SCOPES, type DocumentRow } from "../types.js";
 import { audit } from "../audit.js";
+import { SERVER_NAME, VERSION } from "../version.js";
 
 export interface ToolContext {
   store: DocumentStore;
@@ -35,7 +36,10 @@ function errorContent(error: unknown) {
     error instanceof AuthError ||
     error instanceof ValidationError ||
     error instanceof NotFoundError;
-  const message = known ? (error as Error).message : `internal error: ${(error as Error).message ?? String(error)}`;
+  // Known errors carry safe, user-facing messages. For anything else, log the
+  // detail server-side and return a generic message so internals aren't leaked.
+  if (!known) process.stderr.write(`[error] ${(error as Error).stack ?? String(error)}\n`);
+  const message = known ? (error as Error).message : "internal error";
   return { isError: true as const, content: [{ type: "text" as const, text: message }] };
 }
 
@@ -54,7 +58,7 @@ function summarize(doc: DocumentRow) {
 
 export function buildServer(ctx: ToolContext): McpServer {
   const server = new McpServer(
-    { name: "personal-knowledge-mcp", version: "0.2.0" },
+    { name: SERVER_NAME, version: VERSION },
     { capabilities: { tools: {} } },
   );
 

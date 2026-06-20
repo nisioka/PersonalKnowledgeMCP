@@ -8,7 +8,7 @@
  */
 import "dotenv/config";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Client, Events, GatewayIntentBits, Partials, type Message } from "discord.js";
 import { loadConfig } from "../config.js";
@@ -18,11 +18,22 @@ import { DocumentStore } from "../store/documents.js";
 import { DocTypeRegistry } from "../doctype/registry.js";
 import { HttpIngestClient, type IngestClient, type IngestResult } from "./extractionClient.js";
 import type { Principal } from "../config.js";
-import type { Scope } from "../types.js";
+import { isScope, type Scope } from "../types.js";
+
+/** Max attachment size the bot will download/OCR (default 25 MiB). */
+const MAX_ATTACHMENT_BYTES = process.env.PK_MAX_ATTACHMENT_BYTES
+  ? Number(process.env.PK_MAX_ATTACHMENT_BYTES)
+  : 25 * 1024 * 1024;
 
 /** The bot writes on behalf of the home owner. Default write scope is configurable. */
 function ingestPrincipal(scope: Scope): Principal {
   return { name: "discord", scopes: ["private", "work", "shared"], defaultWriteScope: scope };
+}
+
+/** Reduce a user-supplied filename to a safe basename (no path traversal). */
+function safeFileName(name: string | null): string {
+  const base = basename(name ?? "file").replace(/[^\w.\-]/g, "_");
+  return base.length > 0 ? base : "file";
 }
 
 async function download(url: string): Promise<Buffer> {
@@ -40,18 +51,38 @@ async function handleMessage(
   const stored: string[] = [];
 
   for (const attachment of message.attachments.values()) {
+    if (attachment.size > MAX_ATTACHMENT_BYTES) {
+      stored.push(`⚠️ ${attachment.name ?? "file"} はサイズ上限超過のためスキップ`);
+      continue;
+    }
     const buffer = await download(attachment.url);
-    const localName = `${randomUUID()}-${attachment.name ?? "file"}`;
+    // Sanitize the filename: a random prefix plus a path-safe basename.
+    const localName = `${randomUUID()}-${safeFileName(attachment.name)}`;
     const rawPath = join(filesDir, localName);
     mkdirSync(filesDir, { recursive: true });
     writeFileSync(rawPath, buffer);
 
+    const fallback: IngestResult = {
+      full_text: message.content || `(file: ${attachment.name})`,
+      doc_type: null,
+      extracted: {},
+    };
     let result: IngestResult;
     if (ingest) {
-      result = await ingest.ingestFile(buffer, attachment.name ?? localName, attachment.contentType ?? "application/octet-stream");
+      try {
+        result = await ingest.ingestFile(
+          buffer,
+          attachment.name ?? localName,
+          attachment.contentType ?? "application/octet-stream",
+        );
+      } catch (err) {
+        // OCR service hiccup shouldn't lose the document; keep the original + caption.
+        process.stderr.write(`[discord] ingest failed, storing raw: ${(err as Error).message}\n`);
+        result = fallback;
+      }
     } else {
       // No OCR service configured: keep the original, store any caption as text.
-      result = { full_text: message.content || `(file: ${attachment.name})`, doc_type: null, extracted: {} };
+      result = fallback;
     }
 
     const { document } = await store.register(principal, {
@@ -102,7 +133,11 @@ function main(): void {
   const ingestUrl = process.env.PK_INGEST_URL;
   const ingest = ingestUrl ? new HttpIngestClient(ingestUrl) : null;
   const filesDir = process.env.PK_FILES_DIR ?? "data/files";
-  const scope = (process.env.PK_DISCORD_SCOPE as Scope) ?? "private";
+  const rawScope = process.env.PK_DISCORD_SCOPE;
+  if (rawScope !== undefined && !isScope(rawScope)) {
+    throw new Error(`PK_DISCORD_SCOPE must be one of private|work|shared, got "${rawScope}"`);
+  }
+  const scope: Scope = rawScope ?? "private";
   const principal = ingestPrincipal(scope);
 
   // Privacy guard: never ingest arbitrary server channels. Process only DMs and
