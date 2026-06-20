@@ -10,12 +10,14 @@ Run:  uvicorn ingest_service:app --host 127.0.0.1 --port 8011
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
 import re
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -32,6 +34,9 @@ DEFAULT_DOC_TYPES = [
 ]
 
 app = FastAPI(title="personal-knowledge ingest service")
+
+# Serializes access to the (thread-unsafe) PaddleOCR engine.
+_OCR_LOCK = Lock()
 
 
 # --------------------------------------------------------------------------- OCR
@@ -134,15 +139,27 @@ def health() -> dict[str, Any]:
     return {"ok": True, "model": ANTHROPIC_MODEL, "extraction": bool(os.environ.get("ANTHROPIC_API_KEY"))}
 
 
+def _safe_ocr(data: bytes, filename: str, content_type: str | None) -> str:
+    # PaddleOCR/PaddlePaddle are NOT thread-safe; serialize OCR calls so
+    # concurrent requests cannot segfault the process.
+    with _OCR_LOCK:
+        return ocr_file(data, filename, content_type)
+
+
 @app.post("/ocr")
 async def ocr_endpoint(file: UploadFile = File(...)) -> dict[str, str]:
     data = await file.read()
-    return {"full_text": ocr_file(data, file.filename or "upload", file.content_type)}
+    loop = asyncio.get_running_loop()
+    # OCR is heavy and synchronous; run it off the event loop so health checks
+    # and other requests stay responsive.
+    full_text = await loop.run_in_executor(None, _safe_ocr, data, file.filename or "upload", file.content_type)
+    return {"full_text": full_text}
 
 
 @app.post("/extract")
-def extract_endpoint(req: ExtractRequest) -> dict[str, Any]:
-    result = extract_metadata(req.full_text, req.doc_type_hint)
+async def extract_endpoint(req: ExtractRequest) -> dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, extract_metadata, req.full_text, req.doc_type_hint)
     result["full_text"] = req.full_text
     return result
 
@@ -150,7 +167,8 @@ def extract_endpoint(req: ExtractRequest) -> dict[str, Any]:
 @app.post("/ingest")
 async def ingest_endpoint(file: UploadFile = File(...), doc_type_hint: str | None = Form(default=None)) -> dict[str, Any]:
     data = await file.read()
-    full_text = ocr_file(data, file.filename or "upload", file.content_type)
-    result = extract_metadata(full_text, doc_type_hint)
+    loop = asyncio.get_running_loop()
+    full_text = await loop.run_in_executor(None, _safe_ocr, data, file.filename or "upload", file.content_type)
+    result = await loop.run_in_executor(None, extract_metadata, full_text, doc_type_hint)
     result["full_text"] = full_text
     return result

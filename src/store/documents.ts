@@ -190,6 +190,10 @@ export class DocumentStore {
         if (superseded.length > 0) {
           const placeholders = superseded.map(() => "?").join(",");
           this.db.prepare(`UPDATE documents SET deleted = 1 WHERE id IN (${placeholders})`).run(...superseded);
+          // Drop superseded rows from the search indexes too: sqlite-vec applies
+          // the KNN cut BEFORE the deleted=0 filter, so stale vectors would
+          // consume the k budget and could crowd out live results.
+          for (const sId of superseded) this.dropSearchIndexes(sId);
         }
       }
       return { id, superseded };
@@ -279,7 +283,11 @@ export class DocumentStore {
     if (patch.deleted !== undefined) next.deleted = patch.deleted;
     if (patch.dedup_key !== undefined) next.dedup_key = patch.dedup_key;
 
-    const reembed = patch.full_text !== undefined;
+    // Re-embed when the text changed, or when un-deleting (indexes were dropped
+    // on soft-delete and must be rebuilt). A document that ends up deleted has
+    // its indexes dropped instead (KNN pollution — see syncSearchIndexes notes).
+    const unDeleting = next.deleted === false && current.deleted;
+    const reembed = !next.deleted && (patch.full_text !== undefined || unDeleting);
     const embedding = reembed ? vecBlob(await this.embedder.embed(next.full_text)) : null;
 
     const tx = this.db.transaction(() => {
@@ -302,7 +310,8 @@ export class DocumentStore {
           deleted: next.deleted ? 1 : 0,
           dedup_key: next.dedup_key,
         });
-      if (reembed && embedding) this.syncSearchIndexes(id, next.full_text, next.doc_type, embedding);
+      if (next.deleted) this.dropSearchIndexes(id);
+      else if (reembed && embedding) this.syncSearchIndexes(id, next.full_text, next.doc_type, embedding);
       else this.db.prepare(`UPDATE documents_fts SET doc_type = ? WHERE rowid = ?`).run(next.doc_type ?? "", id);
     });
     tx();
@@ -312,13 +321,24 @@ export class DocumentStore {
   /** Logical delete (manual archive, §4). Reversible via restore(). */
   softDelete(principal: Principal, id: number): DocumentRow {
     this.getForMutation(principal, id); // scope + write check
-    this.db.prepare(`UPDATE documents SET deleted = 1 WHERE id = ?`).run(id);
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`UPDATE documents SET deleted = 1 WHERE id = ?`).run(id);
+      // Keep the search indexes clean so soft-deleted docs cannot pollute KNN.
+      this.dropSearchIndexes(id);
+    });
+    tx();
     return parseRow(this.db.prepare(`SELECT * FROM documents WHERE id = ?`).get(id) as RawDocRow);
   }
 
-  /** Un-delete a logically deleted document. */
-  restore(principal: Principal, id: number): DocumentRow {
-    this.getForMutation(principal, id);
+  /** Un-delete a logically deleted document; rebuilds its search indexes. */
+  async restore(principal: Principal, id: number): Promise<DocumentRow> {
+    const doc = this.getForMutation(principal, id);
+    const embedding = vecBlob(await this.embedder.embed(doc.full_text));
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`UPDATE documents SET deleted = 0 WHERE id = ?`).run(id);
+      this.syncSearchIndexes(id, doc.full_text, doc.doc_type, embedding);
+    });
+    tx();
     this.db.prepare(`UPDATE documents SET deleted = 0 WHERE id = ?`).run(id);
     return parseRow(this.db.prepare(`SELECT * FROM documents WHERE id = ?`).get(id) as RawDocRow);
   }

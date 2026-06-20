@@ -117,6 +117,10 @@ in a real model.
 
 If `PK_INGEST_URL` is unset the bot still stores raw text (no OCR).
 
+**Privacy:** the bot processes only DMs plus channel ids listed in
+`PK_DISCORD_CHANNEL_IDS` (comma-separated). With none set it is **DM-only** — it
+never ingests arbitrary server channels.
+
 ## External exposure (Cloudflare)
 
 Put the LAN server behind a Cloudflare Tunnel + Access (no open ports, home IP
@@ -125,6 +129,13 @@ Access injects `Cf-Access-Authenticated-User-Email`; set
 `PK_TRUST_ACCESS_HEADER=true` and `PK_ACCESS_EMAILS` to map authenticated emails
 to scopes. Register the public URL as a custom connector on claude.ai (Web), and
 it syncs to the mobile app.
+
+**Transport note (known limitation):** the server runs Streamable HTTP in
+*stateless* mode and returns `405` on `GET /mcp`. This works for Claude Code's
+HTTP POST. Some remote-MCP clients open a `GET` SSE stream for server→client
+messages and would need *stateful* session management (session id + GET stream)
+— not yet implemented. To be wired up alongside the actual Phase 3 external
+rollout if a target client requires it.
 
 ## Backup & reminders
 
@@ -136,6 +147,10 @@ it syncs to the mobile app.
 
 Both are one-shot CLIs meant for system cron — `systemd` service+timer units are
 in [`deploy/systemd/`](deploy/systemd/).
+
+**Restore caveat:** stop the MCP server (`pk-mcp.service`) before `npm run
+restore` — overwriting a live SQLite file corrupts it. The restore CLI removes
+stale `-wal`/`-shm` sidecars (which belong to the old DB) and prints this warning.
 
 ## Security notes
 

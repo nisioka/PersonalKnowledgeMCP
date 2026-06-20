@@ -5,6 +5,7 @@
  *   node dist/backup/cli.js restore [targetPath]
  */
 import "dotenv/config";
+import { existsSync, rmSync } from "node:fs";
 import { backupConfigFromEnv, runBackup, runRestore } from "./backup.js";
 
 async function main(): Promise<void> {
@@ -18,6 +19,19 @@ async function main(): Promise<void> {
   }
   if (cmd === "restore") {
     const target = process.argv[3] ?? config.dbPath;
+    // Overwriting a live DB file corrupts it: stop the MCP server first. Any
+    // existing -wal/-shm sidecars belong to the OLD database and would corrupt
+    // the freshly restored file, so remove them.
+    process.stderr.write(
+      "[restore] WARNING: stop the MCP server (pk-mcp.service) before restoring to avoid corruption.\n",
+    );
+    for (const suffix of ["-wal", "-shm"]) {
+      const sidecar = `${target}${suffix}`;
+      if (existsSync(sidecar)) {
+        rmSync(sidecar);
+        process.stderr.write(`[restore] removed stale ${sidecar}\n`);
+      }
+    }
     const name = await runRestore(config, target);
     process.stdout.write(`[restore] wrote ${name} -> ${target}\n`);
     return;

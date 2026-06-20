@@ -105,16 +105,30 @@ function main(): void {
   const scope = (process.env.PK_DISCORD_SCOPE as Scope) ?? "private";
   const principal = ingestPrincipal(scope);
 
+  // Privacy guard: never ingest arbitrary server channels. Process only DMs and
+  // explicitly allow-listed channel ids (PK_DISCORD_CHANNEL_IDS, comma-separated).
+  const allowedChannels = new Set(
+    (process.env.PK_DISCORD_CHANNEL_IDS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages],
     partials: [Partials.Channel],
   });
 
   client.once(Events.ClientReady, (c) => {
-    process.stderr.write(`[discord] logged in as ${c.user.tag} (default scope: ${scope}, ocr: ${ingest ? "on" : "off"})\n`);
+    const where = allowedChannels.size > 0 ? `DM + ${allowedChannels.size} channel(s)` : "DM only";
+    process.stderr.write(
+      `[discord] logged in as ${c.user.tag} (scope: ${scope}, ocr: ${ingest ? "on" : "off"}, watching: ${where})\n`,
+    );
   });
 
   client.on(Events.MessageCreate, (message) => {
+    const isDM = message.guildId === null;
+    if (!isDM && !allowedChannels.has(message.channelId)) return;
     handleMessage(message, { store, ingest, filesDir, principal }).catch(async (err) => {
       process.stderr.write(`[discord] error: ${(err as Error).message}\n`);
       try {

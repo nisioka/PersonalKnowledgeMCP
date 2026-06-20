@@ -171,7 +171,7 @@ describe("DocumentStore", () => {
     const { document } = await store.register(full, { full_text: "archiveme softkey" });
     store.softDelete(full, document.id);
     expect((await store.search(full, { query: "softkey" })).length).toBe(0);
-    store.restore(full, document.id);
+    await store.restore(full, document.id);
     expect((await store.search(full, { query: "softkey" })).length).toBe(1);
   });
 
@@ -180,6 +180,24 @@ describe("DocumentStore", () => {
     store.hardDelete(full, document.id);
     expect(() => store.getForMutation(full, document.id)).toThrow();
     expect((await store.search(full, { query: "hardkey" })).length).toBe(0);
+  });
+
+  it("drops superseded/deleted docs from the vector index (no KNN pollution)", async () => {
+    // Same text repeatedly; only the live row should survive in the vec index.
+    await store.register(full, { full_text: "knnpollute alpha", doc_type: "連絡先", dedup_key: "k", scope: "shared" });
+    await store.register(full, { full_text: "knnpollute alpha", doc_type: "連絡先", dedup_key: "k", scope: "shared" });
+    const live = await store.register(full, { full_text: "knnpollute alpha", doc_type: "連絡先", dedup_key: "k", scope: "shared" });
+
+    const vecHits = await store.search(full, { query: "knnpollute alpha", mode: "vector", limit: 10 });
+    expect(vecHits.map((h) => h.id)).toEqual([live.document.id]);
+
+    const vecRows = db.prepare("SELECT COUNT(*) c FROM documents_vec").get() as { c: number };
+    expect(vecRows.c).toBe(1);
+
+    // Soft-deleting the survivor must also clear the vector index.
+    store.softDelete(full, live.document.id);
+    expect((await store.search(full, { query: "knnpollute alpha", mode: "vector" })).length).toBe(0);
+    expect((db.prepare("SELECT COUNT(*) c FROM documents_vec").get() as { c: number }).c).toBe(0);
   });
 
   it("finds upcoming expiries within a window", async () => {

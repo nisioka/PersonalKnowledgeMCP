@@ -220,7 +220,7 @@ export function buildServer(ctx: ToolContext): McpServer {
     },
     async (args) => {
       try {
-        const doc = ctx.store.restore(ctx.principal, args.id);
+        const doc = await ctx.store.restore(ctx.principal, args.id);
         audit("restore", ctx.principal.name, { id: args.id });
         return jsonContent({ ok: true, restored: summarize(doc) });
       } catch (error) {
