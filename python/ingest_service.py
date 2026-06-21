@@ -27,9 +27,12 @@ PROMPTS_DIR = Path(os.environ.get("PK_PROMPTS_DIR", Path(__file__).resolve().par
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 NO_EXPIRY = "9999-12-31"
 # Cap upload size to avoid memory-exhaustion DoS (default 25 MiB).
-MAX_UPLOAD_BYTES = int(os.environ.get("PK_MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
+MAX_UPLOAD_BYTES = int(os.environ.get("PK_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 # Cap /extract text length to bound worker time and Anthropic API cost.
-MAX_EXTRACT_CHARS = int(os.environ.get("PK_MAX_EXTRACT_CHARS", 20000))
+MAX_EXTRACT_CHARS = int(os.environ.get("PK_MAX_EXTRACT_CHARS", "20000"))
+# Fail closed: non-positive limits would reject every request (413).
+if MAX_UPLOAD_BYTES <= 0 or MAX_EXTRACT_CHARS <= 0:
+    raise ValueError("PK_MAX_UPLOAD_BYTES and PK_MAX_EXTRACT_CHARS must be positive integers")
 
 # Mirror of the TypeScript DocTypeRegistry default vocabulary (design §9.5).
 DEFAULT_DOC_TYPES = [
