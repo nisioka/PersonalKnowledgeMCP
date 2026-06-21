@@ -28,6 +28,8 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 NO_EXPIRY = "9999-12-31"
 # Cap upload size to avoid memory-exhaustion DoS (default 25 MiB).
 MAX_UPLOAD_BYTES = int(os.environ.get("PK_MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
+# Cap /extract text length to bound worker time and Anthropic API cost.
+MAX_EXTRACT_CHARS = int(os.environ.get("PK_MAX_EXTRACT_CHARS", 20000))
 
 # Mirror of the TypeScript DocTypeRegistry default vocabulary (design §9.5).
 DEFAULT_DOC_TYPES = [
@@ -172,6 +174,8 @@ async def ocr_endpoint(file: UploadFile = File(...)) -> dict[str, str]:
 
 @app.post("/extract")
 async def extract_endpoint(req: ExtractRequest) -> dict[str, Any]:
+    if len(req.full_text) > MAX_EXTRACT_CHARS:
+        raise HTTPException(413, f"full_text exceeds {MAX_EXTRACT_CHARS} chars")
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, extract_metadata, req.full_text, req.doc_type_hint)
     result["full_text"] = req.full_text

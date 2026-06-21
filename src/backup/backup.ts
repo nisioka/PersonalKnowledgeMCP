@@ -88,7 +88,8 @@ export async function runRestore(config: BackupConfig, targetPath: string): Prom
   // Write to a temp file then atomically rename, so a mid-write failure cannot
   // leave a truncated/corrupt database at targetPath.
   const tmp = join(dirname(targetPath), `.restore-${process.pid}-${Date.now()}.tmp`);
-  writeFileSync(tmp, plaintext);
+  // 0o600: the decrypted DB is plaintext; keep it owner-only, not umask-dependent.
+  writeFileSync(tmp, plaintext, { mode: 0o600 });
   renameSync(tmp, targetPath);
   return file.name ?? file.id;
 }

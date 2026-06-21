@@ -24,6 +24,13 @@ import { isScope, type Scope } from "../types.js";
 const MAX_ATTACHMENT_BYTES = process.env.PK_MAX_ATTACHMENT_BYTES
   ? Number(process.env.PK_MAX_ATTACHMENT_BYTES)
   : 25 * 1024 * 1024;
+// Fail closed: an invalid limit would silently disable size enforcement
+// (NaN comparisons are always false).
+if (!Number.isFinite(MAX_ATTACHMENT_BYTES) || MAX_ATTACHMENT_BYTES <= 0) {
+  throw new Error(
+    `PK_MAX_ATTACHMENT_BYTES must be a positive number, got "${process.env.PK_MAX_ATTACHMENT_BYTES}"`,
+  );
+}
 
 /** The bot writes on behalf of the home owner. Default write scope is configurable. */
 function ingestPrincipal(scope: Scope): Principal {

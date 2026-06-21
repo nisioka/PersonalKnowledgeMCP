@@ -347,7 +347,6 @@ export class DocumentStore {
       this.syncSearchIndexes(id, doc.full_text, doc.doc_type, embedding);
     });
     tx();
-    this.db.prepare(`UPDATE documents SET deleted = 0 WHERE id = ?`).run(id);
     return parseRow(this.db.prepare(`SELECT * FROM documents WHERE id = ?`).get(id) as RawDocRow);
   }
 

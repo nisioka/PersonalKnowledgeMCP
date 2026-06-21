@@ -29,7 +29,11 @@ export function formatReminder(items: UpcomingExpiry[], withinDays: number): str
     shown++;
   }
   const omitted = items.length - shown;
-  if (omitted > 0) lines.push(`…ほか ${omitted} 件`);
+  if (omitted > 0) {
+    const omittedLine = `…ほか ${omitted} 件`;
+    // Only append the summary line if it still fits under the limit.
+    if (length + omittedLine.length + 1 <= DISCORD_CONTENT_LIMIT) lines.push(omittedLine);
+  }
   return `${header}\n${lines.join("\n")}`;
 }
 

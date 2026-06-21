@@ -38,7 +38,10 @@ function errorContent(error: unknown) {
     error instanceof NotFoundError;
   // Known errors carry safe, user-facing messages. For anything else, log the
   // detail server-side and return a generic message so internals aren't leaked.
-  if (!known) process.stderr.write(`[error] ${(error as Error).stack ?? String(error)}\n`);
+  if (!known) {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+    process.stderr.write(`[error] ${detail}\n`);
+  }
   const message = known ? (error as Error).message : "internal error";
   return { isError: true as const, content: [{ type: "text" as const, text: message }] };
 }
