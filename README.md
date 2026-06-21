@@ -1,87 +1,86 @@
 # Personal Knowledge MCP
 
-A household knowledge base exposed to Claude over MCP. Store family/household
-information (warranties, school letters, municipal notices, contacts, life log,
-…), let Claude search and register it, ingest documents via Discord with OCR, and
-get proactive reminders before things expire — so suggestions are grounded in
-your actual household context.
+MCP 経由で Claude から使える「家庭内ナレッジベース」です。家庭の情報（保証書、
+学校のお便り、自治体通知、連絡先、ライフログなど）を蓄積し、Claude から検索・登録
+でき、Discord 経由で書類を OCR 取り込みし、期限が近づくと能動的にリマインドします
+——提案を我が家の実状況に基づかせるための基盤です。
 
-The full system design is in [`docs/design.md`](docs/design.md). All four roadmap
-phases (design §8) are implemented; the components that touch external services
-(Discord, Cloudflare, Google Drive, Anthropic) need credentials to run, but the
-code, tests, config, and deployment units are all here.
+システム全体の設計は [`docs/design.md`](docs/design.md) を参照してください。ロード
+マップ（設計 §8）の4フェーズすべてを実装済みです。外部サービスに触れるコンポーネント
+（Discord・Cloudflare・Google Drive・Anthropic）は実行に認証情報が必要ですが、コード・
+テスト・設定・デプロイ用ユニットはすべて揃っています。
 
-## What's implemented
+## 実装状況
 
-| Phase | Scope | Status |
+| フェーズ | 範囲 | 状態 |
 |---|---|---|
-| 1 | Schema, permission guard, MCP server (`register`/`search`), LAN-reachable | ✅ |
-| 2 | Discord ingestion, PaddleOCR + Anthropic extraction, externalized prompts, `update`/`delete`/`restore` + dedup, encrypted Google Drive backup | ✅ |
-| 3 | Cloudflare Tunnel + Access (email→scope header mapping), per-route tokens | ✅ |
-| 4 | Audit logging, destructive-op confirmation flow, proactive expiry reminders, doc_type vocabulary | ✅ |
+| 1 | スキーマ、権限ガード、MCP サーバ（`register`/`search`）、LAN 到達可能 | ✅ |
+| 2 | Discord 取り込み、PaddleOCR + Anthropic 抽出、プロンプト外部化、`update`/`delete`/`restore` + 名寄せ、暗号化 Google Drive バックアップ | ✅ |
+| 3 | Cloudflare Tunnel + Access（メール→scope のヘッダマッピング）、経路別トークン | ✅ |
+| 4 | 監査ログ、破壊的操作の確認フロー、能動的な期限リマインダー、doc_type 語彙管理 | ✅ |
 
-## Architecture
+## アーキテクチャ
 
 ```
-Ingestion                         Knowledge Store                 Retrieval / Reasoning
+収集 (Ingestion)                  知識ストア (Store)              参照・推論 (Retrieval)
 ─────────                         ───────────────                 ─────────────────────
-Discord bot ─ OCR+extract ─┐                                      Claude (Code / Web / app)
-(src/ingest, python/)      ├─►  DocumentStore  ─► SQLite + FTS5         │ Streamable HTTP
-MCP register tool ─────────┘    (src/store)       + sqlite-vec          ▼
-                                   ▲  scope-enforced SQL          Express POST /mcp (src/index.ts)
-                                   │                                 │ authenticate (token | CF Access)
-Permission guard (src/auth) ───────┘                                ▼
-                                                                  MCP tools (src/mcp): register,
-Reminders cron ─► Discord webhook (src/reminders)                 search, update, delete, restore,
-Backup cron ─► encrypted → Google Drive (src/backup)              list_doc_types
+Discord bot ─ OCR+抽出 ─┐                                         Claude (Code / Web / アプリ)
+(src/ingest, python/)   ├─►  DocumentStore  ─► SQLite + FTS5            │ Streamable HTTP
+MCP register ツール ────┘    (src/store)       + sqlite-vec             ▼
+                              ▲  scope を強制した SQL            Express POST /mcp (src/index.ts)
+                              │                                    │ 認証 (token | CF Access)
+権限ガード (src/auth) ────────┘                                    ▼
+                                                                 MCP ツール (src/mcp): register,
+リマインダー cron ─► Discord webhook (src/reminders)             search, update, delete, restore,
+バックアップ cron ─► 暗号化 → Google Drive (src/backup)          list_doc_types
 ```
 
-Design principles enforced in code: a **single DB** split logically by `scope`;
-**authorization decided server-side by the token** (clients never pick their own
-scope); **raw text + extracted JSON kept together**; lifecycle handled by a
-**date filter** (`valid_until`) rather than status cron.
+コードで強制している設計原則：**単一 DB** を `scope` で論理分割する／**アクセス可否は
+トークンでサーバ側が決定**する（クライアントが scope を自由に選べない）／**生テキストと
+抽出済み JSON をペアで保持**する／ライフサイクルは状態遷移 cron ではなく **日付フィルタ**
+（`valid_until`）で扱う。
 
-## Setup
+## セットアップ
 
-Requires Node.js ≥ 22 (and Python 3.10+ for OCR).
+Node.js ≥ 22（OCR 用に Python 3.10+）が必要です。
 
 ```bash
 npm install
 npm run build
-npm test          # 52 tests
-cp .env.example .env   # then edit
+npm test          # テスト 56 件
+cp .env.example .env   # 編集する
 ```
 
-Run the MCP server:
+MCP サーバの起動：
 
 ```bash
-npm run dev            # dev (DEV tokens, loopback)
+npm run dev            # 開発用（DEV トークン・ループバック）
 npm run build && npm start
 ```
 
-| Component | Command | Needs |
+| コンポーネント | コマンド | 必要なもの |
 |---|---|---|
-| MCP server | `npm start` | — (DEV tokens for LAN) |
+| MCP サーバ | `npm start` | —（LAN は DEV トークン可） |
 | Discord bot | `npm run discord` | `DISCORD_TOKEN` |
-| OCR/extract service | `uvicorn ingest_service:app` (in `python/`) | PaddleOCR; `ANTHROPIC_API_KEY` for extraction |
-| Backup | `npm run backup` | `PK_BACKUP_PASSPHRASE`, `PK_BACKUP_FOLDER_ID`, Google creds |
-| Restore | `npm run restore [path]` | same |
-| Reminders | `npm run reminders` | `PK_REMINDER_WEBHOOK` (optional) |
+| OCR/抽出サービス | `uvicorn ingest_service:app`（`python/` 内） | PaddleOCR、抽出に `ANTHROPIC_API_KEY` |
+| バックアップ | `npm run backup` | `PK_BACKUP_PASSPHRASE`、`PK_BACKUP_FOLDER_ID`、Google 認証情報 |
+| リストア | `npm run restore [path]` | 同上 |
+| リマインダー | `npm run reminders` | `PK_REMINDER_WEBHOOK`（任意） |
 
-All configuration is via environment variables — see [`.env.example`](.env.example).
+設定はすべて環境変数で行います——[`.env.example`](.env.example) を参照してください。
 
-## MCP tools
+## MCP ツール
 
-| Tool | Purpose | Notes |
+| ツール | 用途 | 備考 |
 |---|---|---|
-| `register` | Store knowledge | `dedup_key` supersedes prior versions (skipped for history doc_types) |
-| `search` | Search | `keyword` (default, trigram FTS — JP/EN substring, ≥3 chars), `vector`, `hybrid`; `include_expired` for history |
-| `update` | Overwrite fields | **Destructive**: returns a preview unless `confirm: true` (§9.4) |
-| `delete` | Archive or remove | `mode: soft` (default, reversible) / `hard`; preview unless `confirm: true` |
-| `restore` | Un-archive | reverses a soft delete |
-| `list_doc_types` | Vocabulary | keeps doc_type spelling convergent (§9.5) |
+| `register` | 知識の登録 | `dedup_key` で旧版を supersede（履歴系 doc_type は対象外） |
+| `search` | 検索 | `keyword`（既定、trigram FTS — 日英の部分一致・3文字以上）、`vector`、`hybrid`／履歴照会は `include_expired` |
+| `update` | フィールド上書き | **破壊的**：`confirm: true` がなければプレビューのみ（§9.4） |
+| `delete` | アーカイブ／削除 | `mode: soft`（既定・可逆）/ `hard`／`confirm: true` まではプレビュー |
+| `restore` | アーカイブ解除 | soft delete を取り消す |
+| `list_doc_types` | 語彙一覧 | doc_type の表記ゆれを抑える（§9.5） |
 
-### Connecting from Claude Code (LAN)
+### Claude Code から接続（LAN）
 
 ```bash
 claude mcp add --transport http personal-knowledge \
@@ -89,100 +88,98 @@ claude mcp add --transport http personal-knowledge \
   --header "Authorization: Bearer full-dev-token"
 ```
 
-### Lifecycle & dedup
+### ライフサイクルと名寄せ
 
-- `valid_until` (date) drives expiry; the sentinel `9999-12-31` means "no expiry".
-  Default search returns only `deleted = 0 AND valid_until >= today`.
-- `deleted` is a manual archive flag, orthogonal to expiry.
-- `dedup_key` lets an update of a "latest-only" fact (a phone number, current
-  plan) supersede the previous version, while history doc_types (each year's tax
-  amount) are never superseded.
+- `valid_until`（日付）が期限を決める。番兵値 `9999-12-31` は「無期限」。既定検索は
+  `deleted = 0 AND valid_until >= today` のみを返す。
+- `deleted` は手動アーカイブ用フラグで、期限とは直交する別軸。
+- `dedup_key` により「最新だけ欲しい」情報（電話番号、現行プラン等）の更新で旧版を
+  supersede できる。一方、履歴系 doc_type（各年の税額など）は supersede しない。
 
-### Embeddings — placeholder
+### 埋め込み — プレースホルダ
 
-A deterministic, offline `HashingEmbedder` runs the vector pipeline with no API
-key; it captures lexical overlap, not real semantics, so keyword search is the
-reliable default. Implement the `Embedder` interface (`src/embedding.ts`) to plug
-in a real model.
+決定的・オフラインの `HashingEmbedder` が API キーなしでベクトルパイプラインを動かし
+ます。語彙的な重なりは捉えますが意味的な類似性は捉えないため、キーワード検索が当面の
+主力です。実モデルへ差し替えるには `Embedder` インターフェース（`src/embedding.ts`）を
+実装してください。
 
-## Document ingestion (Discord + OCR)
+## 書類の取り込み（Discord + OCR）
 
-1. Start the Python service (`python/ingest_service.py`) — PaddleOCR for
-   image/PDF → text, Anthropic for text → structured metadata using the
-   per-`doc_type` prompts in [`prompts/`](prompts/).
-2. Start the Discord bot (`npm run discord`) and drop an image/PDF (or text) into
-   a watched channel. The bot OCRs, extracts, saves the original under
-   `PK_FILES_DIR`, and registers the document into the same store the MCP server
-   reads. It replies with the id / doc_type / expiry.
+1. Python サービス（`python/ingest_service.py`）を起動 — 画像/PDF → テキストは
+   PaddleOCR、テキスト → 構造化メタデータは Anthropic を使用し、抽出には
+   [`prompts/`](prompts/) の doc_type 別プロンプトを用います。
+2. Discord bot（`npm run discord`）を起動し、監視対象チャンネルに画像/PDF（またはテキスト）
+   を投稿します。bot は OCR・抽出し、原本を `PK_FILES_DIR` に保存し、MCP サーバが読むのと
+   同じストアに登録します。返信で id / doc_type / 期限を知らせます。
 
-If `PK_INGEST_URL` is unset the bot still stores raw text (no OCR).
+`PK_INGEST_URL` が未設定でも、bot は生テキストとして保存します（OCR なし）。
 
-**Privacy:** the bot processes only DMs plus channel ids listed in
-`PK_DISCORD_CHANNEL_IDS` (comma-separated). With none set it is **DM-only** — it
-never ingests arbitrary server channels.
+**プライバシー：** bot が処理するのは DM と、`PK_DISCORD_CHANNEL_IDS`（カンマ区切り）に
+列挙したチャンネルだけです。未設定なら **DM のみ** で、任意のサーバーチャンネルを取り込む
+ことはありません。
 
-## External exposure (Cloudflare)
+## 外部公開（Cloudflare）
 
-Put the LAN server behind a Cloudflare Tunnel + Access (no open ports, home IP
-hidden) — see [`deploy/cloudflared-config.example.yml`](deploy/cloudflared-config.example.yml).
-Access injects `Cf-Access-Authenticated-User-Email`; set
-`PK_TRUST_ACCESS_HEADER=true` and `PK_ACCESS_EMAILS` to map authenticated emails
-to scopes. Register the public URL as a custom connector on claude.ai (Web), and
-it syncs to the mobile app.
+LAN サーバを Cloudflare Tunnel + Access の背後に置きます（ポート開放不要・自宅 IP も隠れる）
+——[`deploy/cloudflared-config.example.yml`](deploy/cloudflared-config.example.yml) を参照。
+Access が `Cf-Access-Authenticated-User-Email` ヘッダを付与するので、
+`PK_TRUST_ACCESS_HEADER=true` と `PK_ACCESS_EMAILS` で認証済みメールを scope にマッピング
+します。公開 URL は claude.ai（Web）でカスタムコネクタとして登録すると、モバイルアプリへ
+同期されます。
 
-**Transport note:** the server runs Streamable HTTP in *stateless* mode and
-returns `405` on `GET /mcp`. This is spec-compliant — the MCP Streamable HTTP
-spec says a server MUST either return `text/event-stream` on GET **or** `405`
-when it doesn't offer a server→client stream, and compliant clients fall back to
-POST. Anthropic's remote connectors use Streamable HTTP (legacy HTTP+SSE is
-deprecated), so no separate SSE transport is needed.
+**トランスポートに関する注記：** 本サーバは Streamable HTTP を *ステートレス* モードで動かし、
+`GET /mcp` には `405` を返します。これは仕様準拠です——MCP の Streamable HTTP 仕様は、GET に対し
+「`text/event-stream` を返す」**か**「サーバ→クライアントのストリームを提供しないなら `405` を返す」
+のどちらかを求めており、準拠クライアントは POST にフォールバックします。Anthropic のリモート
+コネクタは Streamable HTTP を使用（レガシーの HTTP+SSE は非推奨）するため、別系統の SSE
+トランスポートは不要です。
 
-## Backup & reminders
+## バックアップとリマインダー
 
-- **Backup** (§9.2): SQLite only, WAL-safe online snapshot, AES-256-GCM encrypted
-  (scrypt-derived key) *before* upload to Google Drive. Original files are not
-  backed up by design — `full_text` keeps documents searchable after a restore.
-- **Reminders** (§4): a daily scan posts items expiring within
-  `PK_REMINDER_DAYS` to a Discord webhook.
+- **バックアップ**（§9.2）：対象は SQLite のみ。WAL セーフなオンラインスナップショットを取得し、
+  Google Drive へアップロードする *前に* AES-256-GCM（scrypt 由来の鍵）で暗号化します。原本
+  ファイルは設計上バックアップ対象外です——`full_text` があればリストア後も検索・参照は機能します。
+- **リマインダー**（§4）：日次スキャンで `PK_REMINDER_DAYS` 以内に期限を迎える項目を Discord
+  webhook へ投稿します。
 
-Both are one-shot CLIs meant for system cron — `systemd` service+timer units are
-in [`deploy/systemd/`](deploy/systemd/).
+どちらも system cron で実行する想定の単発 CLI です。`systemd` のサービス＋タイマーユニットは
+[`deploy/systemd/`](deploy/systemd/) にあります。
 
-**Restore caveat:** stop the MCP server (`pk-mcp.service`) before `npm run
-restore` — overwriting a live SQLite file corrupts it. The restore CLI removes
-stale `-wal`/`-shm` sidecars (which belong to the old DB) and prints this warning.
+**リストアの注意：** `npm run restore` の前に MCP サーバ（`pk-mcp.service`）を停止してください
+——稼働中の SQLite ファイルを上書きすると破損します。リストア CLI は古い `-wal`/`-shm`
+サイドカー（旧 DB のもの）を削除し、この警告を表示します。
 
-## Security notes
+## セキュリティ上の注意
 
-- The server **never trusts a client-supplied scope**; it's intersected with the
-  token's allowed set, and out-of-scope writes are rejected.
-- `shared` knowledge is visible to every token that permits it.
-- Destructive operations require explicit `confirm: true` (§9.4).
-- Every authenticated request is audit-logged (`src/audit.ts`).
-- The CF Access email header is honored only when `PK_TRUST_ACCESS_HEADER=true`,
-  so it can't be spoofed on the LAN.
-- Data (SQLite, files) stays on the home server; only tool responses leave it.
+- サーバは **クライアント指定の scope を一切信用しません**。トークンの許可集合と突き合わせ、
+  許可外への書き込みは拒否します。
+- `shared` の知識は、それを許可するすべてのトークンから参照できます。
+- 破壊的操作には明示的な `confirm: true` が必要です（§9.4）。
+- 認証済みリクエストはすべて監査ログに記録されます（`src/audit.ts`）。
+- CF Access のメールヘッダは `PK_TRUST_ACCESS_HEADER=true` のときだけ信頼されるため、LAN 内で
+  偽装されることはありません。
+- データ（SQLite・ファイル）は自宅サーバ内に留まり、外に出るのはツールの応答のみです。
 
-## Project layout
+## プロジェクト構成
 
 ```
 src/
-  config.ts            token/email → principal registry, runtime config
-  types.ts             domain types
-  audit.ts             one-line audit logging
-  embedding.ts         Embedder interface + Phase-1 hashing placeholder
-  auth/guard.ts        permission guard + request principal resolution
-  db/index.ts          SQLite + FTS5 (trigram) + sqlite-vec schema
-  doctype/registry.ts  doc_type vocabulary + history rules
-  store/documents.ts   scope-enforced register/search/update/delete/restore + reminders
-  mcp/server.ts        MCP tools (register/search/update/delete/restore/list_doc_types)
-  index.ts            Express + Streamable HTTP entrypoint
-  ingest/              Discord bot + OCR/extraction HTTP client
-  backup/              AES-256-GCM crypto, Drive backup/restore, CLI
-  reminders/           expiry scan → Discord, CLI
-python/                FastAPI OCR (PaddleOCR) + extraction (Anthropic) service
-prompts/               externalized per-doc_type extraction prompts
-deploy/                Cloudflare Tunnel config + systemd units/timers
-test/                  guard, store, config, backup, reminder, and HTTP e2e tests
-docs/design.md         full system design
+  config.ts            トークン/メール → principal レジストリ、ランタイム設定
+  types.ts             ドメイン型
+  audit.ts             1行の監査ログ
+  embedding.ts         Embedder インターフェース + Phase 1 のハッシュ実装（暫定）
+  auth/guard.ts        権限ガード + リクエストの principal 解決
+  db/index.ts          SQLite + FTS5（trigram）+ sqlite-vec スキーマ
+  doctype/registry.ts  doc_type 語彙 + 履歴ルール
+  store/documents.ts   scope 強制の register/search/update/delete/restore + リマインダー
+  mcp/server.ts        MCP ツール（register/search/update/delete/restore/list_doc_types）
+  index.ts             Express + Streamable HTTP エントリポイント
+  ingest/              Discord bot + OCR/抽出 HTTP クライアント
+  backup/              AES-256-GCM 暗号、Drive バックアップ/リストア、CLI
+  reminders/           期限スキャン → Discord、CLI
+python/                FastAPI 製 OCR（PaddleOCR）+ 抽出（Anthropic）サービス
+prompts/               doc_type 別に外部化した抽出プロンプト
+deploy/                Cloudflare Tunnel 設定 + systemd ユニット/タイマー
+test/                  guard・store・config・backup・reminder・HTTP e2e テスト
+docs/design.md         システム全体の設計
 ```
