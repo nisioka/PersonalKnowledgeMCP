@@ -61,8 +61,8 @@ npm run build && npm start
 | コンポーネント | コマンド | 必要なもの |
 |---|---|---|
 | MCP サーバ | `npm start` | —（LAN は DEV トークン可） |
-| Discord bot | `npm run discord` | `DISCORD_TOKEN` |
-| OCR/抽出サービス | `uvicorn ingest_service:app`（`python/` 内） | PaddleOCR、抽出に `ANTHROPIC_API_KEY` |
+| Discord bot（任意・代替経路） | `npm run discord` | `DISCORD_TOKEN` |
+| OCR/抽出サービス（任意・代替経路） | `uvicorn ingest_service:app`（`python/` 内） | PaddleOCR、抽出に `ANTHROPIC_API_KEY` |
 | バックアップ | `npm run backup` | `PK_BACKUP_PASSPHRASE`、`PK_BACKUP_FOLDER_ID`、Google 認証情報 |
 | リストア | `npm run restore [path]` | 同上 |
 | リマインダー | `npm run reminders` | `PK_REMINDER_WEBHOOK`（任意） |
@@ -103,14 +103,35 @@ claude mcp add --transport http personal-knowledge \
 主力です。実モデルへ差し替えるには `Embedder` インターフェース（`src/embedding.ts`）を
 実装してください。
 
-## 書類の取り込み（Discord + OCR）
+## 書類の取り込み
 
-1. Python サービス（`python/ingest_service.py`）を起動 — 画像/PDF → テキストは
-   PaddleOCR、テキスト → 構造化メタデータは Anthropic を使用し、抽出には
-   [`prompts/`](prompts/) の doc_type 別プロンプトを用います。
-2. Discord bot（`npm run discord`）を起動し、監視対象チャンネルに画像/PDF（またはテキスト）
-   を投稿します。bot は OCR・抽出し、原本を `PK_FILES_DIR` に保存し、MCP サーバが読むのと
-   同じストアに登録します。返信で id / doc_type / 期限を知らせます。
+### 推奨：Claude 自身に抽出させる（API キー不要）
+
+構造抽出は「推論」なので、**別課金の Anthropic API ではなく、あなたが既に契約している
+Claude（Code / デスクトップ / アプリ）自身**にやらせるのが最もコスト効率的です。Claude は
+マルチモーダルなので OCR も内蔵で行え、PaddleOCR も Python サービスも `ANTHROPIC_API_KEY`
+も不要です（Claude の月額プラン内で完結）。
+
+1. Claude に書類（画像/PDF/テキスト）を添付する。
+2. MCP プロンプト **`ingest_document`** を実行する（doc_type 語彙・期限推定・dedup_key の
+   付け方を指示済み）。
+3. Claude が全文を読み取り、構造化して `register` を呼ぶ。
+
+Discord から無人で投げたい場合も、[Claude Code の Discord 連携（Channels）](https://azukiazusa.dev/blog/how-discord-integration-works/)
+を使えば同じ流れになります：Discord 添付 → Channels が `download_attachment` でローカル保存
+→ ローカルの Claude Code が読み取り → 本 MCP の `register` を呼ぶ。これも Claude Code の
+サブスク認証で動くため **API キー不要**です。
+
+### 代替：自前 Discord bot + Python OCR（完全無人・任意）
+
+Claude を介さず完全無人で取り込みたい場合の代替経路です（API コストが発生し得ます）。
+
+1. Python サービス（`python/ingest_service.py`）を起動 — 画像/PDF → テキストは PaddleOCR、
+   テキスト → 構造化メタデータは Anthropic を使用し、[`prompts/`](prompts/) の doc_type 別
+   プロンプトを用います。**`ANTHROPIC_API_KEY` を設定したときだけ**構造抽出が走り、未設定なら
+   生テキスト保存にデグレードします。
+2. Discord bot（`npm run discord`）を起動。監視対象チャンネルに投稿すると、bot は OCR・抽出し、
+   原本を `PK_FILES_DIR` に保存して同じストアに登録します。
 
 `PK_INGEST_URL` が未設定でも、bot は生テキストとして保存します（OCR なし）。
 

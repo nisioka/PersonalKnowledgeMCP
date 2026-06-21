@@ -62,7 +62,7 @@ function summarize(doc: DocumentRow) {
 export function buildServer(ctx: ToolContext): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: VERSION },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {}, prompts: {} } },
   );
 
   server.registerTool(
@@ -251,6 +251,49 @@ export function buildServer(ctx: ToolContext): McpServer {
       } catch (error) {
         return errorContent(error);
       }
+    },
+  );
+
+  // Prompt that guides Claude to do OCR + structure extraction ITSELF (using the
+  // client's own multimodal ability) and then call `register`. This removes the
+  // need for a server-side Anthropic API key / Python OCR: attach a document in
+  // Claude (Code / Desktop / app, or via a Claude Code Discord bridge), run this
+  // prompt, and the extraction is billed under the user's existing Claude plan.
+  server.registerPrompt(
+    "ingest_document",
+    {
+      title: "Ingest a document into the knowledge base",
+      description:
+        "Read an attached document (image/PDF/text), extract structured metadata, and register it. " +
+        "Does the OCR/extraction client-side (no API key needed).",
+    },
+    () => {
+      const vocab = ctx.docTypes
+        .list()
+        .map((d) => `- ${d.name}: ${d.description}（${d.keepHistory ? "履歴保持＝dedup_keyはnull" : "最新優先"}／${d.expiryHint}）`)
+        .join("\n");
+      const text = [
+        "添付された書類（画像／PDF／テキスト）を読み取り、家庭内ナレッジベースに登録してください。",
+        "",
+        "手順:",
+        "1. 書類の全文を文字起こしする（これを register の full_text に渡す）。",
+        "2. 内容から構造化メタデータを抽出する。",
+        "3. personal-knowledge の register ツールを呼ぶ。",
+        "",
+        "register に渡す値の決め方:",
+        "- full_text: 読み取った全文。",
+        "- doc_type: 下記の既定リストから最も近いものを選ぶ。無ければ簡潔な新しい日本語名を付ける（list_doc_types も参照可）。",
+        "- extracted: 読み取れた項目の JSON。日付は YYYY-MM-DD。発行日/イベント日は issued_date / event_date に入れる（登録日とは別物）。",
+        "- valid_until: 有効期限 YYYY-MM-DD。doc_type ごとの目安（下記）に従う。無期限なら \"9999-12-31\"。",
+        "- dedup_key: 「最新だけ残す」情報には論理キー（例 \"保育園:電話番号\"）。履歴を残す doc_type では null。",
+        "- scope: 明確に共有/仕事のものでなければ private。",
+        "",
+        "破壊的操作ではないので register はそのまま実行してよい。複数書類なら1件ずつ register する。",
+        "",
+        "既定の doc_type リスト:",
+        vocab,
+      ].join("\n");
+      return { messages: [{ role: "user", content: { type: "text", text } }] };
     },
   );
 

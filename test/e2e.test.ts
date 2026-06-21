@@ -147,4 +147,16 @@ describe("MCP server over HTTP", () => {
     expect(payload.doc_types.some((d: { name: string }) => d.name === "保証書")).toBe(true);
     await client.close();
   });
+
+  it("exposes the ingest_document prompt with the doc_type vocabulary", async () => {
+    const client = await connect("full-token");
+    const { prompts } = await client.listPrompts();
+    expect(prompts.map((p) => p.name)).toContain("ingest_document");
+
+    const got = await client.getPrompt({ name: "ingest_document" });
+    const text = got.messages.map((m) => (m.content as { type: string; text: string }).text).join("\n");
+    expect(text).toContain("register");
+    expect(text).toContain("保証書");
+    await client.close();
+  });
 });
