@@ -14,7 +14,6 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "discord": "node dist/ingest/discord.js",
     "backup": "node dist/backup/cli.js backup",
     "restore": "node dist/backup/cli.js restore",
     "reminders": "node dist/reminders/cli.js",
@@ -24,7 +23,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "better-sqlite3": "^11.10.0",
-    "discord.js": "^14.26.4",
     "dotenv": "^17.4.2",
     "express": "^5.1.0",
     "googleapis": "^173.0.0",
