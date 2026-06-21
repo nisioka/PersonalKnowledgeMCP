@@ -1,0 +1,23 @@
+# Cloudflare Tunnel config (design §6/§7, Phase 3).
+# Exposes the LAN-only MCP server to the Claude cloud without opening a port or
+# revealing the home IP. Put Cloudflare Access IN FRONT of the hostname so only
+# authenticated family/work emails reach it; Access injects the
+# Cf-Access-Authenticated-User-Email header, which the server maps to a scope
+# (set PK_TRUST_ACCESS_HEADER=true and PK_ACCESS_EMAILS).
+#
+# Install: cloudflared tunnel create personal-knowledge
+#          cloudflared tunnel route dns personal-knowledge knowledge.example.com
+#          cloudflared tunnel --config deploy/cloudflared-config.yml run
+
+tunnel: REPLACE_WITH_TUNNEL_ID
+credentials-file: /etc/cloudflared/REPLACE_WITH_TUNNEL_ID.json
+
+ingress:
+  - hostname: knowledge.example.com
+    # `path` is a Go regexp. Restrict the public surface to the MCP endpoint so
+    # /health and any future routes are not exposed. Use ^/mcp(/.*)?$ to also
+    # allow subpaths.
+    path: ^/mcp$
+    service: http://127.0.0.1:8848
+  # Everything else is rejected.
+  - service: http_status:404
