@@ -211,7 +211,8 @@ SQLCipher で DB 全体（FTS5 インデックス・WAL を含む）を暗号化
 3. 確認：暗号化後の DB は鍵なしでは開けません。
 
    ```bash
-   sqlite3 data/knowledge.db ".tables"   # "file is not a database" 等で開けなければ暗号化済み
+   # PK_DB_PATH を上書きしている場合はそのパスを使う（既定は data/knowledge.db）
+   sqlite3 "${PK_DB_PATH:-data/knowledge.db}" ".tables"   # "file is not a database" 等で開けなければ暗号化済み
    ```
 
 > - バックアップ CLI（STEP 6）は同じ `PK_DB_PASSPHRASE` を読んで暗号化 DB をスナップショットします。

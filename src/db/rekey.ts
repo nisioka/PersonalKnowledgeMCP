@@ -19,8 +19,13 @@ const escape = (s: string): string => s.replace(/'/g, "''");
  */
 function rekeySafely(db: DB, run: () => void): void {
   db.pragma("journal_mode = DELETE");
-  run();
-  db.pragma("journal_mode = WAL");
+  try {
+    run();
+  } finally {
+    // Restore WAL even if rekey throws, so a failed migration never leaves the
+    // DB stuck in rollback-journal mode.
+    db.pragma("journal_mode = WAL");
+  }
 }
 
 /** Encrypt an existing plaintext DB at `dbPath` in place using `key`. */

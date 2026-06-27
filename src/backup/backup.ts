@@ -123,11 +123,17 @@ export function backupConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Backu
   const folderId = env.PK_BACKUP_FOLDER_ID;
   if (!passphrase) throw new Error("PK_BACKUP_PASSPHRASE is required");
   if (!folderId) throw new Error("PK_BACKUP_FOLDER_ID is required");
+  // Match config.ts / rekey-cli.ts: a set-but-empty PK_DB_PASSPHRASE is a failed
+  // secret injection — fail loudly instead of silently snapshotting as plaintext.
+  const dbKey = env.PK_DB_PASSPHRASE;
+  if (dbKey !== undefined && dbKey.trim().length === 0) {
+    throw new Error("PK_DB_PASSPHRASE is set but empty");
+  }
   return {
     dbPath: env.PK_DB_PATH ?? "data/knowledge.db",
     passphrase,
     folderId,
-    dbKey: env.PK_DB_PASSPHRASE || undefined,
+    dbKey,
     credentialsPath: env.GOOGLE_APPLICATION_CREDENTIALS,
   };
 }
