@@ -29,7 +29,10 @@ function jsonRpcError(res: Response, status: number, message: string): void {
 }
 
 export function createApp(config: AppConfig = loadConfig()): { app: Express; db: DB; config: AppConfig } {
-  const db = openDatabase(config.dbPath, { embeddingDim: config.embedding.dimension });
+  const db = openDatabase(config.dbPath, {
+    embeddingDim: config.embedding.dimension,
+    key: config.dbKey,
+  });
   const docTypes = new DocTypeRegistry();
   const store = new DocumentStore(db, new HashingEmbedder(config.embedding.dimension), docTypes);
 

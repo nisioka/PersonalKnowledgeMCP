@@ -10,14 +10,20 @@ import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
-import Database from "better-sqlite3";
+import Database from "better-sqlite3-multiple-ciphers";
 import { google } from "googleapis";
+import { applyCipherKey } from "../db/index.js";
 import { decrypt, encrypt } from "./crypto.js";
 
 export interface BackupConfig {
   dbPath: string;
   passphrase: string;
   folderId: string;
+  /**
+   * Passphrase the live DB is encrypted with (PK_DB_PASSPHRASE). Needed to read
+   * an encrypted DB when snapshotting; omit when the DB is unencrypted.
+   */
+  dbKey?: string;
   /** Path to a Google service-account key JSON (GOOGLE_APPLICATION_CREDENTIALS). */
   credentialsPath?: string;
 }
@@ -25,15 +31,28 @@ export interface BackupConfig {
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 
 /** Take a WAL-safe snapshot of the DB and return it as a Buffer. */
-export async function createSnapshot(dbPath: string): Promise<Buffer> {
+export async function createSnapshot(dbPath: string, dbKey?: string): Promise<Buffer> {
   const dir = mkdtempSync(join(tmpdir(), "pk-backup-"));
   const snapshotPath = join(dir, "snapshot.db");
   try {
-    const db = new Database(dbPath, { readonly: true });
-    try {
-      await db.backup(snapshotPath);
-    } finally {
-      db.close();
+    if (dbKey) {
+      // The online backup API rejects an encrypted source. `VACUUM INTO` instead
+      // produces a transactionally consistent (WAL-safe) copy that inherits the
+      // source's encryption, so the snapshot stays encrypted at rest too.
+      const db = new Database(dbPath);
+      try {
+        applyCipherKey(db, dbKey);
+        db.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
+      } finally {
+        db.close();
+      }
+    } else {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        await db.backup(snapshotPath);
+      } finally {
+        db.close();
+      }
     }
     return readFileSync(snapshotPath);
   } finally {
@@ -56,7 +75,7 @@ function backupName(now = new Date()): string {
 
 /** Snapshot -> encrypt -> upload. Returns the created Drive file id. */
 export async function runBackup(config: BackupConfig, now = new Date()): Promise<string> {
-  const snapshot = await createSnapshot(config.dbPath);
+  const snapshot = await createSnapshot(config.dbPath, config.dbKey);
   const encrypted = encrypt(snapshot, config.passphrase);
   const drive = driveClient(config.credentialsPath);
   const res = await drive.files.create({
@@ -88,7 +107,9 @@ export async function runRestore(config: BackupConfig, targetPath: string): Prom
   // Write to a temp file then atomically rename, so a mid-write failure cannot
   // leave a truncated/corrupt database at targetPath.
   const tmp = join(dirname(targetPath), `.restore-${process.pid}-${Date.now()}.tmp`);
-  // 0o600: the decrypted DB is plaintext; keep it owner-only, not umask-dependent.
+  // 0o600: keep the DB owner-only (not umask-dependent). The bytes are the raw
+  // snapshot — still SQLCipher-encrypted if the source DB was — so the server
+  // reopens it with PK_DB_PASSPHRASE; restore itself stays key-agnostic.
   writeFileSync(tmp, plaintext, { mode: 0o600 });
   renameSync(tmp, targetPath);
   return file.name ?? file.id;
@@ -104,6 +125,7 @@ export function backupConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Backu
     dbPath: env.PK_DB_PATH ?? "data/knowledge.db",
     passphrase,
     folderId,
+    dbKey: env.PK_DB_PASSPHRASE || undefined,
     credentialsPath: env.GOOGLE_APPLICATION_CREDENTIALS,
   };
 }

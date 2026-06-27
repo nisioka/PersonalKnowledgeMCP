@@ -7,11 +7,26 @@
  */
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import Database, { type Database as DB } from "better-sqlite3";
+import Database, { type Database as DB } from "better-sqlite3-multiple-ciphers";
 import * as sqliteVec from "sqlite-vec";
 import { NO_EXPIRY } from "../types.js";
 
 export type { DB };
+
+/**
+ * Apply SQLCipher-compatible whole-file encryption to an open connection. Must
+ * run before any other statement so the key applies to every page read/written.
+ * The whole DB file — including the FTS5 index and WAL — is encrypted at rest;
+ * decryption happens in memory, so search and every other query are unchanged.
+ *
+ * We pin the `sqlcipher` cipher scheme for a stable, portable on-disk format.
+ * The key is interpolated (PRAGMA takes no bound parameters), so single quotes
+ * are escaped by doubling.
+ */
+export function applyCipherKey(db: DB, key: string): void {
+  db.pragma("cipher='sqlcipher'");
+  db.pragma(`key='${key.replace(/'/g, "''")}'`);
+}
 
 /** Build the schema DDL. The vector dimension is fixed at table creation. */
 function schemaSql(embeddingDim: number): string {
@@ -57,6 +72,12 @@ export interface OpenDbOptions {
   embeddingDim: number;
   /** Skip mkdir for the parent dir (e.g. ':memory:'). */
   ensureDir?: boolean;
+  /**
+   * Passphrase for at-rest encryption (SQLCipher). When set, the DB file is
+   * opened/created encrypted; an existing plaintext DB must be migrated first
+   * (see `db/rekey`). Omit (or leave empty) to keep the DB unencrypted.
+   */
+  key?: string;
 }
 
 /** Open (creating if needed) the knowledge DB with all extensions loaded. */
@@ -65,6 +86,7 @@ export function openDatabase(path: string, options: OpenDbOptions): DB {
     mkdirSync(dirname(path), { recursive: true });
   }
   const db = new Database(path);
+  if (options.key) applyCipherKey(db, options.key);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   sqliteVec.load(db);
