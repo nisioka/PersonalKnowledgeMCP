@@ -192,18 +192,24 @@ SQLCipher で DB 全体（FTS5 インデックス・WAL を含む）を暗号化
 **検索や使い勝手は一切変わりません**。
 
 1. `.env` に合言葉を追記：
+
    ```bash
    PK_DB_PASSPHRASE=<長くて強いパスフレーズ>   # 失うと DB もバックアップも復元不能。厳重保管
    ```
+
 2. **既存の平文 DB がある場合**は一度だけ移行（サーバ停止中に実行）：
+
    ```bash
    sudo systemctl stop pk-mcp
    npm run db:encrypt        # data/knowledge.db をその場で暗号化（PK_DB_PATH で別パス指定可）
    sudo systemctl start pk-mcp
    ```
+
    新規 DB（まだ作っていない）なら移行は不要で、`PK_DB_PASSPHRASE` を設定して起動すれば
    最初から暗号化された DB が作られます。
+
 3. 確認：暗号化後の DB は鍵なしでは開けません。
+
    ```bash
    sqlite3 data/knowledge.db ".tables"   # "file is not a database" 等で開けなければ暗号化済み
    ```

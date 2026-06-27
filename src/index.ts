@@ -74,8 +74,10 @@ export function createApp(config: AppConfig = loadConfig()): { app: Express; db:
         if (!res.headersSent) jsonRpcError(res, error.status, error.message);
         return;
       }
-      // Redact: a stack/message can echo request-body content (e.g. document text).
-      process.stderr.write(`[error] ${redactString((error as Error).stack ?? String(error))}\n`);
+      // Null-safe: a thrown non-Error (null/undefined/primitive) must not cause a
+      // secondary crash. Redact: a stack/message can echo request-body content.
+      const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+      process.stderr.write(`[error] ${redactString(detail)}\n`);
       if (!res.headersSent) jsonRpcError(res, 500, "internal error");
     }
   });

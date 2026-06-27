@@ -18,7 +18,11 @@ function main(): void {
     process.stderr.write("usage: rekey-cli.js encrypt|decrypt [dbPath]\n");
     process.exit(1);
   }
-  if (!key) throw new Error("PK_DB_PASSPHRASE is required");
+  // Reject a missing OR blank/whitespace-only passphrase (matches config.ts): a
+  // failed secret injection must not silently rekey the DB to an empty key.
+  if (key === undefined || key.trim().length === 0) {
+    throw new Error("PK_DB_PASSPHRASE is required");
+  }
   process.stderr.write(
     "[rekey] WARNING: stop the MCP server (pk-mcp.service) before migrating to avoid corruption.\n",
   );

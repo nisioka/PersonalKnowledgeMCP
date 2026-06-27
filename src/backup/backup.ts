@@ -39,7 +39,9 @@ export async function createSnapshot(dbPath: string, dbKey?: string): Promise<Bu
       // The online backup API rejects an encrypted source. `VACUUM INTO` instead
       // produces a transactionally consistent (WAL-safe) copy that inherits the
       // source's encryption, so the snapshot stays encrypted at rest too.
-      const db = new Database(dbPath);
+      // readonly + fileMustExist: never write to (or silently create) the source —
+      // a missing/mis-set PK_DB_PATH must fail, not back up an empty DB.
+      const db = new Database(dbPath, { readonly: true, fileMustExist: true });
       try {
         applyCipherKey(db, dbKey);
         db.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);

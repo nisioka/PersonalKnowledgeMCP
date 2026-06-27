@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3-multiple-ciphers";
@@ -32,6 +32,15 @@ describe("at-rest encryption", () => {
       { name: "full", scopes: ["private", "shared"], defaultWriteScope: "private" },
       { full_text: SECRET },
     );
+
+    // Before checkpoint, the freshly written row lives in the WAL sidecar — it
+    // too must be encrypted (the whole point of "WAL included").
+    const wal = `${path}-wal`;
+    if (existsSync(wal)) {
+      const walRaw = readFileSync(wal);
+      expect(walRaw.includes(Buffer.from(SECRET))).toBe(false);
+      expect(walRaw.includes(Buffer.from("個人番号"))).toBe(false);
+    }
     db.close();
 
     // The raw file must not contain the plaintext.
@@ -56,7 +65,7 @@ describe("at-rest encryption", () => {
     expect(() => openDatabase(path, { embeddingDim: DIM, key: "wrong key" })).toThrow();
   });
 
-  it("snapshots an encrypted DB to an encrypted buffer", async () => {
+  it("snapshots an encrypted DB (uncheckpointed WAL) to an encrypted buffer", async () => {
     const path = tmpDb();
     const db = openDatabase(path, { embeddingDim: DIM, key: KEY });
     const store = new DocumentStore(db, new HashingEmbedder(DIM));
@@ -64,23 +73,25 @@ describe("at-rest encryption", () => {
       { name: "full", scopes: ["private", "shared"], defaultWriteScope: "private" },
       { full_text: SECRET },
     );
-    db.close();
 
+    // Snapshot while the DB is still open: the row is in the WAL, not yet
+    // checkpointed into the main file. This is the WAL-safe path the feature
+    // promises — a separate readonly connection must still capture it.
     const snapshot = await createSnapshot(path, KEY);
     expect(snapshot.includes(Buffer.from(SECRET))).toBe(false);
+    db.close();
 
-    // The snapshot opens only with the same key.
-    const snapPath = join(mkdtempSync(join(tmpdir(), "pk-snap-")), "s.db");
-    rmSync(snapPath, { force: true });
-    const fs = await import("node:fs");
-    fs.writeFileSync(snapPath, snapshot);
+    // The snapshot opens only with the same key and contains the WAL-era row.
+    const snapDir = mkdtempSync(join(tmpdir(), "pk-snap-"));
+    dirs.push(snapDir); // afterEach removes the whole dir, not just the file
+    const snapPath = join(snapDir, "s.db");
+    writeFileSync(snapPath, snapshot);
     const opened = new Database(snapPath);
     opened.pragma("cipher='sqlcipher'");
     opened.pragma(`key='${KEY}'`);
     const count = opened.prepare("SELECT count(*) AS c FROM documents").get() as { c: number };
     expect(count.c).toBe(1);
     opened.close();
-    rmSync(snapPath, { force: true });
   });
 
   it("migrates a plaintext DB to encrypted in place", async () => {

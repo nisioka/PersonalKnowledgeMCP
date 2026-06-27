@@ -42,7 +42,15 @@ export function redact(value: unknown, keyHint?: string): unknown {
   if (typeof value === "string") return redactString(value);
   if (Array.isArray(value)) return value.map((v) => redact(v));
   if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
+    // Only walk plain objects. Class instances (Date, RegExp, Error, Buffer, …)
+    // are passed through untouched — recursing would strip their prototype and
+    // silently flatten them to `{}` (e.g. a Date would lose its value).
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return value;
+    // Null-prototype container: assigning a `__proto__` key can't replace the
+    // output's prototype, so a malicious payload can't smuggle an inherited
+    // `toJSON` past the audit logger's JSON.stringify.
+    const out: Record<string, unknown> = Object.create(null);
     for (const [k, v] of Object.entries(value)) out[k] = redact(v, k);
     return out;
   }
