@@ -18,6 +18,7 @@ import { DocTypeRegistry } from "./doctype/registry.js";
 import { AuthError, resolvePrincipal } from "./auth/guard.js";
 import { buildServer } from "./mcp/server.js";
 import { audit } from "./audit.js";
+import { redactString } from "./redact.js";
 import { SERVER_NAME, VERSION } from "./version.js";
 
 function jsonRpcError(res: Response, status: number, message: string): void {
@@ -73,7 +74,8 @@ export function createApp(config: AppConfig = loadConfig()): { app: Express; db:
         if (!res.headersSent) jsonRpcError(res, error.status, error.message);
         return;
       }
-      process.stderr.write(`[error] ${(error as Error).stack ?? String(error)}\n`);
+      // Redact: a stack/message can echo request-body content (e.g. document text).
+      process.stderr.write(`[error] ${redactString((error as Error).stack ?? String(error))}\n`);
       if (!res.headersSent) jsonRpcError(res, 500, "internal error");
     }
   });
