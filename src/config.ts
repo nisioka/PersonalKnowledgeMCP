@@ -21,6 +21,11 @@ export interface AppConfig {
   host: string;
   port: number;
   dbPath: string;
+  /**
+   * Passphrase for at-rest DB encryption (SQLCipher). Undefined => unencrypted.
+   * Sourced from PK_DB_PASSPHRASE; the same value is needed by the backup CLI.
+   */
+  dbKey?: string;
   /** Bearer token -> principal. */
   tokens: Map<string, Principal>;
   /** True when falling back to built-in dev tokens (logged loudly). */
@@ -120,12 +125,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(`PK_PORT must be an integer between 1 and 65535, got "${env.PK_PORT}"`);
   }
 
+  // Like PK_TOKENS: a set-but-empty value usually means a failed secret
+  // injection — fail loudly rather than silently storing the DB unencrypted.
+  const dbKey = env.PK_DB_PASSPHRASE;
+  if (dbKey !== undefined && dbKey.trim().length === 0) {
+    throw new Error("PK_DB_PASSPHRASE is set but empty");
+  }
+
   return {
     // Default to loopback so an unconfigured server is not exposed by accident.
     // Set PK_HOST=0.0.0.0 to accept LAN connections (see design §5).
     host: env.PK_HOST ?? "127.0.0.1",
     port,
     dbPath: env.PK_DB_PATH ?? "data/knowledge.db",
+    dbKey,
     tokens,
     usingDevTokens,
     accessEmails,

@@ -18,6 +18,7 @@ import { DocTypeRegistry } from "./doctype/registry.js";
 import { AuthError, resolvePrincipal } from "./auth/guard.js";
 import { buildServer } from "./mcp/server.js";
 import { audit } from "./audit.js";
+import { redactString } from "./redact.js";
 import { SERVER_NAME, VERSION } from "./version.js";
 
 function jsonRpcError(res: Response, status: number, message: string): void {
@@ -29,7 +30,10 @@ function jsonRpcError(res: Response, status: number, message: string): void {
 }
 
 export function createApp(config: AppConfig = loadConfig()): { app: Express; db: DB; config: AppConfig } {
-  const db = openDatabase(config.dbPath, { embeddingDim: config.embedding.dimension });
+  const db = openDatabase(config.dbPath, {
+    embeddingDim: config.embedding.dimension,
+    key: config.dbKey,
+  });
   const docTypes = new DocTypeRegistry();
   const store = new DocumentStore(db, new HashingEmbedder(config.embedding.dimension), docTypes);
 
@@ -70,7 +74,10 @@ export function createApp(config: AppConfig = loadConfig()): { app: Express; db:
         if (!res.headersSent) jsonRpcError(res, error.status, error.message);
         return;
       }
-      process.stderr.write(`[error] ${(error as Error).stack ?? String(error)}\n`);
+      // Null-safe: a thrown non-Error (null/undefined/primitive) must not cause a
+      // secondary crash. Redact: a stack/message can echo request-body content.
+      const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+      process.stderr.write(`[error] ${redactString(detail)}\n`);
       if (!res.headersSent) jsonRpcError(res, 500, "internal error");
     }
   });

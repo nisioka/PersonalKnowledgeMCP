@@ -14,7 +14,10 @@ import { runReminders } from "./reminder.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const db = openDatabase(config.dbPath, { embeddingDim: config.embedding.dimension });
+  const db = openDatabase(config.dbPath, {
+    embeddingDim: config.embedding.dimension,
+    key: config.dbKey,
+  });
   try {
     const store = new DocumentStore(db, new HashingEmbedder(config.embedding.dimension));
     const rawDays = process.env.PK_REMINDER_DAYS;
