@@ -8,18 +8,19 @@
 import "dotenv/config";
 import { loadConfig } from "../config.js";
 import { openDatabase } from "../db/index.js";
-import { HashingEmbedder } from "../embedding.js";
+import { createEmbedder } from "../embedding.js";
 import { DocumentStore } from "../store/documents.js";
 import { runReminders } from "./reminder.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  const embedder = createEmbedder(config);
   const db = openDatabase(config.dbPath, {
-    embeddingDim: config.embedding.dimension,
+    embeddingDim: embedder.dimension,
     key: config.dbKey,
   });
   try {
-    const store = new DocumentStore(db, new HashingEmbedder(config.embedding.dimension));
+    const store = new DocumentStore(db, embedder);
     const rawDays = process.env.PK_REMINDER_DAYS;
     const days = rawDays === undefined ? 14 : Number(rawDays);
     if (!Number.isInteger(days) || days < 0) {

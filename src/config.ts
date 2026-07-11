@@ -39,7 +39,12 @@ export interface AppConfig {
   /** Trust the Cf-Access-Authenticated-User-Email header. Default false. */
   trustAccessHeader: boolean;
   embedding: {
-    /** Dimension of the vector column. Fixed at DB creation time. */
+    /**
+     * Dimension for the placeholder `HashingEmbedder`. The active embedder
+     * (see `createEmbedder`) is the source of truth for the vector column
+     * width: the DB is built from `embedder.dimension`. A real model fixes its
+     * own dimension and would ignore this knob. Fixed at DB creation time.
+     */
     dimension: number;
   };
 }
