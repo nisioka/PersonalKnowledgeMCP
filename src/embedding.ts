@@ -9,6 +9,7 @@
  * phase by implementing `Embedder` and passing it where the store is built.
  */
 import { createHash } from "node:crypto";
+import type { AppConfig } from "./config.js";
 
 export interface Embedder {
   readonly dimension: number;
@@ -60,4 +61,24 @@ export class HashingEmbedder implements Embedder {
     }
     return vec;
   }
+}
+
+/**
+ * Single construction point for the embedding provider.
+ *
+ * The rest of the app never instantiates an `Embedder` directly and never
+ * hard-codes a dimension: it calls this factory and then derives the DB's
+ * vector column width from the returned `embedder.dimension`. That keeps the
+ * embedder the single source of truth for dimensionality, so swapping in a
+ * real model — whose dimension is fixed by the model, not by config — needs
+ * no second knob kept in sync.
+ *
+ * To adopt real semantic search later, branch here (e.g. on a
+ * `config.embedding.provider` setting) and return a different `Embedder`
+ * implementation — an in-process ONNX model (transformers.js) or an
+ * Ollama-backed client. A real model can lazily load its weights on the first
+ * `embed()` call, so this factory can stay synchronous. Nothing else changes.
+ */
+export function createEmbedder(config: AppConfig): Embedder {
+  return new HashingEmbedder(config.embedding.dimension);
 }

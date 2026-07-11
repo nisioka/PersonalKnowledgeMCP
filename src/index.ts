@@ -12,7 +12,7 @@ import { loadConfig } from "./config.js";
 import { openDatabase, type DB } from "./db/index.js";
 import type { AppConfig } from "./config.js";
 import type { Express } from "express";
-import { HashingEmbedder } from "./embedding.js";
+import { createEmbedder } from "./embedding.js";
 import { DocumentStore } from "./store/documents.js";
 import { DocTypeRegistry } from "./doctype/registry.js";
 import { AuthError, resolvePrincipal } from "./auth/guard.js";
@@ -30,12 +30,13 @@ function jsonRpcError(res: Response, status: number, message: string): void {
 }
 
 export function createApp(config: AppConfig = loadConfig()): { app: Express; db: DB; config: AppConfig } {
+  const embedder = createEmbedder(config);
   const db = openDatabase(config.dbPath, {
-    embeddingDim: config.embedding.dimension,
+    embeddingDim: embedder.dimension,
     key: config.dbKey,
   });
   const docTypes = new DocTypeRegistry();
-  const store = new DocumentStore(db, new HashingEmbedder(config.embedding.dimension), docTypes);
+  const store = new DocumentStore(db, embedder, docTypes);
 
   const app = express();
   app.use(express.json({ limit: "10mb" }));
