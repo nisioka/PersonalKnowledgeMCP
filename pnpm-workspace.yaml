@@ -1,0 +1,5 @@
+# better-sqlite3-multiple-ciphers は SQLCipher 入り native モジュールのビルドが必須。
+# esbuild は tsx / vitest が使うバイナリを postinstall で配置する。
+allowBuilds:
+  better-sqlite3-multiple-ciphers: true
+  esbuild: true

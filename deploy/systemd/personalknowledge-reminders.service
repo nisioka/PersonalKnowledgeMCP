@@ -1,0 +1,12 @@
+# __USER__ / __APP_DIR__ はプレースホルダ。設置時に置換すること（docs/operations.md STEP 7 参照）。
+[Unit]
+Description=Personal Knowledge daily expiry reminders to Discord
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__APP_DIR__
+# .env は dotenv/config が WorkingDirectory から読む（EnvironmentFile は使わない）。
+ExecStart=/usr/bin/node dist/reminders/cli.js

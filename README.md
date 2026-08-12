@@ -44,28 +44,28 @@ Claude が書類を読取り ─┐                                          Cla
 
 ## セットアップ
 
-Node.js ≥ 22 が必要です。
+Node.js ≥ 22 と pnpm が必要です（pnpm は `corepack enable pnpm` で入ります）。
 
 ```bash
-npm install
-npm run build
-npm test          # テスト一式
+pnpm install
+pnpm run build
+pnpm test          # テスト一式
 cp .env.example .env   # 編集する
 ```
 
 MCP サーバの起動：
 
 ```bash
-npm run dev            # 開発用（DEV トークン・ループバック）
-npm run build && npm start
+pnpm run dev            # 開発用（DEV トークン・ループバック）
+pnpm run build && pnpm start
 ```
 
 | コンポーネント | コマンド | 必要なもの |
 |---|---|---|
-| MCP サーバ | `npm start` | —（LAN は DEV トークン可） |
-| バックアップ | `npm run backup` | `PK_BACKUP_PASSPHRASE`、`PK_BACKUP_FOLDER_ID`、Google 認証情報 |
-| リストア | `npm run restore [path]` | 同上 |
-| リマインダー | `npm run reminders` | `PK_REMINDER_WEBHOOK`（任意） |
+| MCP サーバ | `pnpm start` | —（LAN は DEV トークン可） |
+| バックアップ | `pnpm run backup` | `PK_BACKUP_PASSPHRASE`、`PK_BACKUP_FOLDER_ID`、Google 認証情報 |
+| リストア | `pnpm run restore [path]` | 同上 |
+| リマインダー | `pnpm run reminders` | `PK_REMINDER_WEBHOOK`（任意） |
 
 設定はすべて環境変数で行います——[`.env.example`](.env.example) を参照してください。
 
@@ -83,11 +83,11 @@ npm run build && npm start
 加えて MCP プロンプト **`ingest_document`** を提供します（添付書類を Claude 自身に読み取らせ
 → 構造化 → `register` させる定型指示。後述「書類の取り込み」参照）。
 
-### Claude Code から接続（LAN）
+### Claude Code から接続
 
 ```bash
 claude mcp add --transport http personal-knowledge \
-  http://SERVER-IP:8848/mcp \
+  http://localhost:8848/mcp \
   --header "Authorization: Bearer full-dev-token"
 ```
 
@@ -154,7 +154,7 @@ Access が `Cf-Access-Authenticated-User-Email` ヘッダを付与するので�
 どちらも system cron で実行する想定の単発 CLI です。`systemd` のサービス＋タイマーユニットは
 [`deploy/systemd/`](deploy/systemd/) にあります。
 
-**リストアの注意：** `npm run restore` の前に MCP サーバ（`pk-mcp.service`）を停止してください
+**リストアの注意：** `pnpm run restore` の前に MCP サーバ（`personalknowledge-mcp.service`）を停止してください
 ——稼働中の SQLite ファイルを上書きすると破損します。リストア CLI は古い `-wal`/`-shm`
 サイドカー（旧 DB のもの）を削除し、この警告を表示します。
 
@@ -173,7 +173,7 @@ Access が `Cf-Access-Authenticated-User-Email` ヘッダを付与するので�
 - データ（SQLite・ファイル）は自宅サーバ内に留まり、外に出るのはツールの応答のみです。
 - **保存時暗号化（任意）**：`PK_DB_PASSPHRASE` を設定すると SQLite ファイル全体（FTS5 インデックス・
   WAL を含む）を SQLCipher で暗号化します。復号はメモリ上で行われるため検索や利便性は変わりません。
-  既存の平文 DB は一度だけ `npm run db:encrypt`（サーバ停止中）で移行します。バックアップ CLI も
+  既存の平文 DB は一度だけ `pnpm run db:encrypt`（サーバ停止中）で移行します。バックアップ CLI も
   同じ `PK_DB_PASSPHRASE` で暗号化 DB を読みます。**この合言葉を失うと DB もバックアップも復元
   できません**ので、マイナンバー等を入れる場合は確実に控えてください。なお自分のマイナンバーを
   自分のために保存するだけなら番号法の収集・保管制限（他人の個人番号が対象）には該当しませんが、
@@ -199,3 +199,5 @@ deploy/                Cloudflare Tunnel 設定 + systemd ユニット/タイマ
 test/                  guard・store・config・backup・reminder・HTTP e2e テスト
 docs/design.md         システム全体の設計
 ```
+
+sed -e "s|__USER__|$APP_USER|g" -e "s|__APP_DIR__|$APP_DIR|g" deploy/systemd/personalknowledge-tunnel.service | sudo tee /etc/systemd/system/personalknowledge-tunnel.service > /dev/null
