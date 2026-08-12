@@ -41,33 +41,54 @@ export APP_USER="$USER"   # サービスを動かすユーザー＝ふだんの�
 ## STEP 1. ホスト準備
 
 ### WSL で systemd を有効にする
+
 `/etc/wsl.conf` に以下があること（無ければ追記して `wsl --shutdown` → 再起動）。
+
 ```ini
 [boot]
 systemd=true
 ```
+
 `ps -p 1 -o comm=` が `systemd` を返せば有効です。
 
-### Node.js 22 をシステムに入れる
+### Node.js 22.13+ をシステムに入れる
+
 **nvm の Node では systemd から起動できません。** systemd は `PATH` を継承しないため、
 ユニットの `ExecStart` には実在する絶対パス（`/usr/bin/node`）が必要です。nvm のパスは
 バージョン番号を含むので、Node を上げるたびにサービスが壊れます。
 
 Ubuntu 標準の `nodejs` パッケージは 18 系で、これでは **ネイティブモジュール
-（better-sqlite3）の ABI が合わず起動時にクラッシュします**。NodeSource から 22 系を入れてください。
+（better-sqlite3）の ABI が合わず起動時にクラッシュします**。NodeSource から 22 系を入れてください
+（`pnpm@11.8.0` が `engines.node >=22.13` を要求するため、22.13 以上が必要です）。
 
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt-get install -y nodejs
-/usr/bin/node --version   # v22.x であること
+/usr/bin/node --version   # v22.13 以上であること
 ```
+
 > 既存の nvm はそのまま残り、対話シェルでは従来どおり nvm 版が使われます。systemd だけが
 > `/usr/bin/node` を見ます。
 
 ### 依存の導入とビルド
+
+**⚠️ ビルドは systemd と同じ `/usr/bin/node` で行ってください。** ネイティブモジュール
+（better-sqlite3）は**ビルドに使った Node の ABI に固定**されます。対話シェルでは nvm の Node が
+優先されるため、そのまま `pnpm install` すると nvm 版の ABI でビルドされ、`/usr/bin/node` で動く
+systemd サービスがロードに失敗する恐れがあります。両者のメジャーが揃っていれば通常は動きますが、
+事故を防ぐため PATH を固定して実行します。
+
 ```bash
-corepack enable pnpm    # pnpm は package.json の packageManager に合わせて自動で揃う
+# corepack は NodeSource 版なら /usr/bin/corepack。shim 作成に書き込み権限が要るので、
+# EACCES で失敗する場合は sudo を付ける（例: sudo corepack enable pnpm）。
+corepack enable pnpm
+
+# nvm を一時的に外し、システムの /usr/bin/node を使ってビルドする
 cd "$APP_DIR"
+export PATH="/usr/bin:$PATH"
+hash -r
+node --version                       # /usr/bin/node（v22.13+）が使われること
+corepack pnpm exec node --version    # 上と一致すること
 
 pnpm install --frozen-lockfile
 pnpm run build
@@ -93,10 +114,12 @@ echo "family: $(openssl rand -hex 32)"
 `.env` を編集（最小構成）。`PK_TOKENS` は **1行の JSON**で書きます。上で生成した値を `<...>` に入れてください。
 
 ```bash
-# WSL2 は NAT の内側なので、Windows 側の LAN IP（192.168.x.x）は WSL 内に存在しない。
-# それを指定すると EADDRNOTAVAIL で起動に失敗する。0.0.0.0 で待ち受ける。
-# これで Windows から http://localhost:8848 が届く（WSL の localhost フォワーディング）。
-PK_HOST=0.0.0.0
+# ★ 127.0.0.1（ループバック）に限定する。0.0.0.0 にしない。
+#   - cloudflared は 127.0.0.1:8848 に繋ぐので、外部公開はこれで成立する。
+#   - Windows からは WSL の localhost フォワーディングで 127.0.0.1:8848 に届く。
+#   - 0.0.0.0 だと LAN の他ホストから 8848 に直接到達でき、PK_TRUST_ACCESS_HEADER=true の
+#     場合に Cf-Access-Authenticated-User-Email ヘッダを偽装して認証を回避される（STEP 5 参照）。
+PK_HOST=127.0.0.1
 PK_PORT=8848
 
 # ★ DB は必ずリポジトリの外に置く（理由は下記）。~ は展開されないので絶対パスで書く
@@ -106,20 +129,35 @@ PK_TOKENS={"<full秘密>":{"name":"full","scopes":["private","work","shared"],"d
 ```
 
 `.env` にはトークンが平文で入るので、パーミッションを絞ります（`.gitignore` 済みでコミットはされません）。
+
 ```bash
 chmod 600 .env
 ```
 
 ### ★ DB をリポジトリの外に置く理由
+
 既定の `data/knowledge.db` はリポジトリ内で、かつ `.gitignore` されています。開発ディレクトリを
 そのまま本番として動かす構成では、**`git clean -xdf` を一度打っただけで DB が消えます**（ignore された
 ファイルごと削除されるため）。データをツリーの外に出しておけば、リポジトリを clean しようが
 clone し直そうがデータは無傷です。バックアップ／リストア CLI も同じ `PK_DB_PATH` を見ます。
 
+まだ DB を作っていない新規セットアップなら、この移動は不要です（`PK_DB_PATH` を設定して起動すれば
+そこに新規作成されます）。**既に `data/` に DB がある場合のみ**、以下で移動します。稼働中の SQLite を
+移動すると WAL/SHM が不整合になるため、必ず**サーバを停止してから**行い、**移動が失敗したら中断**します
+（`|| true` で握りつぶすと、空 DB が新規作成されてデータが消えたように見えます）。
+
 ```bash
 mkdir -p ~/.local/share/personal-knowledge
-# 既に data/ に DB がある場合は移動（サーバ停止中に）
-mv data/knowledge.db* ~/.local/share/personal-knowledge/ 2>/dev/null || true
+
+# サーバ（手動起動・systemd の両方）を止めてから
+sudo systemctl stop personalknowledge-mcp 2>/dev/null || true
+
+# 移動対象を先に確認し、存在する場合だけ移動。失敗したら set -e で中断
+if ls data/knowledge.db* >/dev/null 2>&1; then
+  ( set -e; mv -v data/knowledge.db* ~/.local/share/personal-knowledge/ )
+else
+  echo "data/ に DB は無い（新規セットアップ）。移動不要。"
+fi
 ```
 
 > ⚠️ `PK_TOKENS` を設定しないと**開発用の既定トークン**で起動します（LAN 検証専用）。本番では必ず設定してください。
@@ -130,6 +168,7 @@ mv data/knowledge.db* ~/.local/share/personal-knowledge/ 2>/dev/null || true
 ## STEP 3. 起動と疎通確認（まずここがゴール）
 
 ### 手動起動で確認
+
 ```bash
 pnpm start
 # 別ターミナルで
@@ -137,11 +176,33 @@ curl http://localhost:8848/health      # {"ok":true,...} が返る
 ```
 
 ### Windows 側の Claude Code から接続
-Windows のターミナルで：
+
+Windows のターミナルで接続します。**トークンをコマンド引数に直接書くと、シェル履歴と
+実行中のプロセス引数（`ps` で他ユーザーにも見える）に平文で残ります。** Claude Code は
+`.mcp.json` の `headers` 値で `${VAR}` 展開をサポートするので、トークンは環境変数から
+参照させ、設定にはリテラルの `${MCP_TOKEN}` を保存します。
+
 ```bash
-claude mcp add --transport http personal-knowledge http://localhost:8848/mcp --header "Authorization: Bearer <full秘密>"
+# トークンは対話的に入力（履歴に残さない）。行頭スペースでも履歴抑止できる（HISTCONTROL=ignorespace）
+read -r -s MCP_TOKEN         # full 秘密を貼り付けて Enter
+export MCP_TOKEN
+
+# \${...} を「その場で展開させず」リテラルとして設定に書き込む
+claude mcp add --transport http personal-knowledge \
+  http://localhost:8848/mcp \
+  --header "Authorization: Bearer \${MCP_TOKEN}"
 ```
-Claude Code で「`search` や `register` が使えるか」を試す。ここまでで **手元運用は完成**。
+
+設定ファイルには `Bearer ${MCP_TOKEN}` という文字列が保存され、Claude Code が**起動時に環境から
+`MCP_TOKEN` を展開**します（トークン自体は設定にもプロセス引数にも残りません）。そのため
+`MCP_TOKEN` を **Claude Code が動く環境**に用意しておく必要があります（未設定だと `claude mcp list`
+に missing-variable の警告が出て `${MCP_TOKEN}` が未展開のまま使われます）。
+
+> トークンを環境変数にも置きたくない場合は、`headersHelper`（接続時に外部コマンドで
+> ヘッダを生成する仕組み。例: `pass`／OS のキーチェーンから取り出す）を使えます。
+> 詳細は Claude Code の MCP ドキュメント参照。
+
+登録後、Claude Code で「`search` や `register` が使えるか」を試します。ここまでで **手元運用は完成**。
 
 ### 常駐化（systemd）
 
@@ -160,8 +221,14 @@ sed -e "s|__USER__|$APP_USER|g" -e "s|__APP_DIR__|$APP_DIR|g" \
 sudo systemctl daemon-reload
 sudo systemctl enable --now personalknowledge-mcp.service
 sudo systemctl status personalknowledge-mcp.service      # active (running) を確認
-journalctl -u personalknowledge-mcp -f                    # ログ確認（監査ログもここに出る）
+sudo journalctl -u personalknowledge-mcp -f               # ログ確認（監査ログもここに出る）
 ```
+
+> `personalknowledge-*` は system unit なので、ログ参照は `sudo journalctl -u ...` が確実です。
+> `sudo` なしで見たい場合は、自分を `systemd-journal`（または `adm`）グループに追加してください
+> （`sudo usermod -aG systemd-journal "$USER"` → 再ログイン）。以降このドキュメントの
+> `journalctl` 例は、権限に応じて `sudo` を付けてください。
+
 > `EnvironmentFile` は**あえて使っていません**。systemd の環境ファイルはシェル風のクォート解釈を
 > するため、`PK_TOKENS` の JSON（値の中に `"` を含む）が壊れます。`src/index.ts` が `dotenv/config` を
 > 読み込んでいるので、`WorkingDirectory` さえ合っていれば `.env` は自前で読まれます。
@@ -174,14 +241,18 @@ journalctl -u personalknowledge-mcp -f                    # ログ確認（監�
 
 **1. ビルドしたら再起動する。** サービスが読むのは `dist/` です。`src/` を直しても
 `pnpm run build` しなければ反映されず、ビルドしても再起動しなければ反映されません。
+
 ```bash
 pnpm run build && sudo systemctl restart personalknowledge-mcp
 ```
 
 **2. `pnpm run dev` はポートと DB を分ける。** 同じ `.env` を読むので、そのままだと稼働中の
-サービスと同じ 8848 を掴もうとして衝突し、同じ DB に書き込みます。
+サービスと同じ 8848 を掴もうとして衝突し、同じ DB に書き込みます。開発 DB は `/tmp` に置かないこと
+（`/tmp` は他ローカルユーザーから読める可能性があり、個人情報が漏れます）。ユーザー専用ディレクトリを使います。
+
 ```bash
-PK_PORT=8849 PK_DB_PATH=/tmp/dev.db pnpm run dev
+mkdir -p ~/.local/share/personal-knowledge/dev
+PK_PORT=8849 PK_DB_PATH=~/.local/share/personal-knowledge/dev/dev.db pnpm run dev
 ```
 
 ---
@@ -226,6 +297,7 @@ ls ~/.cloudflared/            # cert.pem と <UUID>.json が見える
 ### 5-2. DNS レコードを作る
 
 以下example.comを自身のドメインにおきかえる。
+
 ```bash
 cloudflared tunnel route dns personal-knowledge personal-knowledge.example.com
 ```
@@ -322,7 +394,7 @@ cloudflared tunnel --config deploy/cloudflared-config.yml run   # 動作確認�
 
 同じ Managed OAuth の設定にある **Allowed redirect URIs** に、以下を追加します。
 
-```
+```text
 https://claude.ai/api/mcp/auth_callback
 ```
 
@@ -333,7 +405,7 @@ Managed OAuth は、クライアントに**動的クライアント登録（DCR�
 登録し忘れると、コネクタ追加時にこうなります（Client ID を入れろと言われますが**原因はそこでは
 ありません**。Client ID 欄は空のままで正しい）。
 
-```
+```text
 personal-knowledge/mcp のサインインサービスに登録できませんでした。
 もう一度お試しいただくか、コネクタ設定で OAuth Client ID を追加してください。
 ```
@@ -360,10 +432,12 @@ One-time PIN を入力し直すのは、**リフレッシュトークン（グ�
 ポリシー変更（家族の追加・削除）は速やかに効く、というトレードオフになります。
 
 `.env` に追記して、Access が付けるメールヘッダを scope にマッピング：
+
 ```bash
 PK_TRUST_ACCESS_HEADER=true
 PK_ACCESS_EMAILS={"you@example.com":{"name":"full","scopes":["private","work","shared"]},"family@example.com":{"name":"family","scopes":["shared"]}}
 ```
+
 > `PK_TRUST_ACCESS_HEADER=true` は **Access の背後でのみ**にしてください（直アクセスでヘッダ偽装されないため）。トークン認証は引き続き有効です。
 
 `.env` の変更を反映：`sudo systemctl restart personalknowledge-mcp`
@@ -424,12 +498,15 @@ SQLite を暗号化して日次で Google Drive に退避します（原本フ�
 1. Google Cloud でサービスアカウントを作成し、JSON 鍵をサーバへ配置。
 2. 退避先の **Drive フォルダ**を作り、そのフォルダをサービスアカウントのメールに「編集者」で共有。フォルダ ID を控える。
 3. `.env` に追記：
+
    ```bash
    PK_BACKUP_PASSPHRASE=<長くて強いパスフレーズ>     # 復元に必須。別途厳重保管
    PK_BACKUP_FOLDER_ID=<DriveフォルダID>
    GOOGLE_APPLICATION_CREDENTIALS=/home/<ユーザー名>/.local/share/personal-knowledge/sa.json
    ```
+
 4. 手動実行で確認 → タイマー有効化：
+
    ```bash
    pnpm run backup     # "uploaded encrypted snapshot, file id ..." が出れば成功
    sed -e "s|__USER__|$APP_USER|g" -e "s|__APP_DIR__|$APP_DIR|g" \
@@ -441,11 +518,13 @@ SQLite を暗号化して日次で Google Drive に退避します（原本フ�
    ```
 
 ### リストア（復元）手順
+
 ```bash
 sudo systemctl stop personalknowledge-mcp          # ★必ず先にサーバ停止（稼働中の上書きは破損の元）
 pnpm run restore                      # 最新バックアップを取得→復号→DBへ書き戻し（-wal/-shm は自動掃除）
 sudo systemctl start personalknowledge-mcp
 ```
+
 > `PK_BACKUP_PASSPHRASE` を失うと復号できません。パスフレーズはパスワードマネージャ等で別管理を。
 
 ---
@@ -494,11 +573,14 @@ SQLCipher で DB 全体（FTS5 インデックス・WAL を含む）を暗号化
 
 1. Discord でチャンネルの **Webhook URL** を作成。
 2. `.env` に追記：
+
    ```bash
    PK_REMINDER_WEBHOOK=https://discord.com/api/webhooks/xxxx/yyyy
    PK_REMINDER_DAYS=14      # 何日先まで対象にするか（既定14）
    ```
+
 3. 手動実行 → タイマー有効化：
+
    ```bash
    pnpm run reminders        # 該当があれば Discord に投稿、無ければ何もしない
    sed -e "s|__USER__|$APP_USER|g" -e "s|__APP_DIR__|$APP_DIR|g" \
@@ -514,11 +596,13 @@ SQLCipher で DB 全体（FTS5 インデックス・WAL を含む）を暗号化
 
 - **状態/ログ**：`systemctl status personalknowledge-mcp` / `journalctl -u personalknowledge-mcp -f`（監査ログ `[audit] ...` もここ）。
 - **更新（コード更新時）**：
+
   ```bash
   cd "$APP_DIR" && git pull
   pnpm install --frozen-lockfile && pnpm run build
   sudo systemctl restart personalknowledge-mcp
   ```
+
 - **トークンの追加・失効**：`.env` の `PK_TOKENS` を編集 → `sudo systemctl restart personalknowledge-mcp`。漏れたトークンは値を差し替えれば即無効。
 - **データの所在**：`~/.local/share/personal-knowledge/`（SQLite 本体）。リポジトリの外に置くので、
   ツリーを `git clean` しても消えません。バックアップ対象は SQLite のみ。
@@ -531,8 +615,8 @@ SQLCipher で DB 全体（FTS5 インデックス・WAL を含む）を暗号化
 
 | 症状 | 確認 |
 |---|---|
-| Windows から繋がらない | `curl http://localhost:8848/health`、`PK_HOST=0.0.0.0`（後述）、サービスが active か、トークン一致 |
-| 起動直後に落ちる（listening は出る） | `PK_HOST` に Windows 側の LAN IP（192.168.x.x）を書いていないか。**そのアドレスは WSL 内に存在せず** `EADDRNOTAVAIL` になる。`0.0.0.0` にする |
+| Windows から繋がらない | `curl http://localhost:8848/health`、`PK_HOST=127.0.0.1`（WSL の localhost フォワーディングで Windows から届く）、サービスが active か、トークン一致 |
+| 起動直後に落ちる（listening は出る） | `PK_HOST` に Windows 側の LAN IP（192.168.x.x）を書いていないか。**そのアドレスは WSL 内に存在せず** `EADDRNOTAVAIL` になる。`127.0.0.1` にする |
 | systemd 経由だけ起動に失敗する | `/usr/bin/node --version` が v22 か。18 系だと better-sqlite3 の **ABI 不一致でクラッシュ**する（nvm の node は systemd から見えない） |
 | 401 が返る | `Authorization: Bearer <token>` の値が `PK_TOKENS` のキーと一致しているか |
 | スマホから繋がらない | Cloudflare Tunnel 稼働、Access ポリシーにメール登録、`PK_TRUST_ACCESS_HEADER=true`、`PK_ACCESS_EMAILS` のメール一致 |
@@ -549,7 +633,7 @@ SQLCipher で DB 全体（FTS5 インデックス・WAL を含む）を暗号化
 ## あなたが行う作業のチェックリスト
 
 - [ ] STEP 1: WSL の systemd 有効化 → **NodeSource で Node 22 をシステム導入**（`/usr/bin/node`）→ `pnpm install --frozen-lockfile` → `pnpm run build`
-- [ ] STEP 2: `.env` 作成（`chmod 600`）、`PK_TOKENS` を生成・設定、`PK_HOST=0.0.0.0`、**`PK_DB_PATH` をリポジトリ外の絶対パスに**
+- [ ] STEP 2: `.env` 作成（`chmod 600`）、`PK_TOKENS` を生成・設定、`PK_HOST=127.0.0.1`、**`PK_DB_PATH` をリポジトリ外の絶対パスに**
 - [ ] STEP 3: `pnpm start` で疎通 → Claude Code から接続 → systemd 常駐化 → WSL の自動起動をタスクスケジューラに登録
 - [ ] STEP 3.5: 開発と本番の同居ルールを把握（ビルド後は restart／`dev` はポートと DB を分ける）
 - [ ] STEP 4: `ingest_document` で書類取り込みを試す

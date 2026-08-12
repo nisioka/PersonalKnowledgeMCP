@@ -23,7 +23,7 @@ MCP 経由で Claude から使える「家庭内ナレッジベース」です�
 
 ## アーキテクチャ
 
-```
+```text
 収集 (Ingestion)                  知識ストア (Store)              参照・推論 (Retrieval)
 ─────────                         ───────────────                 ─────────────────────
 Claude が書類を読取り ─┐                                          Claude (Code / Web / アプリ)
@@ -44,7 +44,7 @@ Claude が書類を読取り ─┐                                          Cla
 
 ## セットアップ
 
-Node.js ≥ 22 と pnpm が必要です（pnpm は `corepack enable pnpm` で入ります）。
+Node.js ≥ 22.13 と pnpm が必要です（pnpm は `corepack enable pnpm` で入ります。`pnpm@11.8.0` が Node ≥ 22.13 を要求します）。
 
 ```bash
 pnpm install
@@ -181,7 +181,7 @@ Access が `Cf-Access-Authenticated-User-Email` ヘッダを付与するので�
 
 ## プロジェクト構成
 
-```
+```text
 src/
   config.ts            トークン/メール → principal レジストリ、ランタイム設定
   types.ts             ドメイン型

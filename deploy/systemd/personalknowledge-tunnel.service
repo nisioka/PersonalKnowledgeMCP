@@ -7,6 +7,9 @@
 Description=Cloudflare Tunnel for Personal Knowledge MCP
 After=network-online.target personalknowledge-mcp.service
 Wants=network-online.target
+# Requires: トンネルは MCP サーバが無ければ無意味。tunnel を enable/start すると
+# mcp も一緒に起動し、mcp が停止すれば tunnel も停止する（After と併用で順序も保証）。
+Requires=personalknowledge-mcp.service
 
 [Service]
 Type=simple
