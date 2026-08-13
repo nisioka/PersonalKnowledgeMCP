@@ -1,0 +1,24 @@
+# __USER__ / __APP_DIR__ はプレースホルダ。設置時に置換すること（docs/operations.md STEP 5-5 参照）。
+#
+# ★ ユニット名を `cloudflared.service` にしないこと。同じホストで別のトンネル
+#   （cloudflared service install で入れた dashboard 管理のもの等）を既に動かしている場合、
+#   そのサービスを上書きして壊す。本プロジェクト専用の名前を使う。
+[Unit]
+Description=Cloudflare Tunnel for Personal Knowledge MCP
+After=network-online.target personalknowledge-mcp.service
+Wants=network-online.target
+# Requires: トンネルは MCP サーバが無ければ無意味。tunnel を enable/start すると
+# mcp も一緒に起動し、mcp が停止すれば tunnel も停止する（After と併用で順序も保証）。
+Requires=personalknowledge-mcp.service
+
+[Service]
+Type=simple
+# 認証情報は実行ユーザーの ~/.cloudflared/<UUID>.json にある。root で動かすとホームが
+# 変わって読めなくなるので、MCP サーバと同じユーザーで動かす。
+User=__USER__
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --config __APP_DIR__/deploy/cloudflared-config.yml run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

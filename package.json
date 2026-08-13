@@ -5,8 +5,9 @@
   "description": "Household knowledge base MCP server (Phase 1: LAN-only foundation)",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
+  "packageManager": "pnpm@11.8.0",
   "bin": {
     "pk-mcp": "dist/index.js"
   },

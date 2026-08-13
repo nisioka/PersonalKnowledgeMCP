@@ -18,3 +18,6 @@ data/
 .env
 .env.*
 !.env.example
+
+# Cloudflare Tunnel: 実設定（トンネル UUID・ホスト名・認証情報のパスを含む）
+deploy/cloudflared-config.yml

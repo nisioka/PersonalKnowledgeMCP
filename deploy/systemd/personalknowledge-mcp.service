@@ -1,0 +1,20 @@
+# __USER__ / __APP_DIR__ はプレースホルダ。設置時に置換すること（docs/operations.md STEP 3 参照）:
+#   sed -e "s|__USER__|$USER|g" -e "s|__APP_DIR__|$PWD|g" \
+#     deploy/systemd/personalknowledge-mcp.service | sudo tee /etc/systemd/system/personalknowledge-mcp.service
+[Unit]
+Description=Personal Knowledge MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__APP_DIR__
+# .env は dotenv/config が WorkingDirectory から読む。systemd の EnvironmentFile は
+# シェル風のクォート解釈をするため PK_TOKENS の JSON が壊れる。あえて使わない。
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
