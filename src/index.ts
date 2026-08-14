@@ -35,7 +35,7 @@ export function createApp(config: AppConfig = loadConfig()): { app: Express; db:
     embeddingDim: embedder.dimension,
     key: config.dbKey,
   });
-  const docTypes = new DocTypeRegistry();
+  const docTypes = new DocTypeRegistry(db);
   const store = new DocumentStore(db, embedder, docTypes);
 
   const app = express();

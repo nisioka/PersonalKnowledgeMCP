@@ -12,7 +12,9 @@ import { DocTypeRegistry } from "../doctype/registry.js";
 import { resolveReadScopes, resolveWriteScope } from "../auth/guard.js";
 import {
   NO_EXPIRY,
+  isLifecycle,
   type DocumentRow,
+  type Lifecycle,
   type RegisterInput,
   type RegisterResult,
   type Scope,
@@ -88,6 +90,7 @@ interface RawDocRow {
   raw_path: string | null;
   full_text: string;
   doc_type: string | null;
+  lifecycle: string;
   extracted: string;
   scope: string;
   valid_until: string;
@@ -110,6 +113,7 @@ function parseRow(raw: RawDocRow): DocumentRow {
     raw_path: raw.raw_path,
     full_text: raw.full_text,
     doc_type: raw.doc_type,
+    lifecycle: raw.lifecycle as Lifecycle,
     extracted,
     scope: raw.scope as Scope,
     valid_until: raw.valid_until,
@@ -143,7 +147,7 @@ export class DocumentStore {
     private readonly embedder: Embedder,
     docTypes?: DocTypeRegistry,
   ) {
-    this.docTypes = docTypes ?? new DocTypeRegistry();
+    this.docTypes = docTypes ?? new DocTypeRegistry(db);
   }
 
   /** Insert a new document. Scope is authorized via the guard, never trusted. */
@@ -167,11 +171,24 @@ export class DocumentStore {
     const docType = input.doc_type ?? null;
     const dedupKey = input.dedup_key ?? null;
 
-    // Supersede prior versions only for non-history doc_types with a dedup key (§9.1).
-    const supersede =
-      dedupKey !== null &&
-      !this.docTypes.keepsHistory(docType) &&
-      (input.supersede ?? true);
+    // doc_type is a curated vocabulary (§9.5): null or a known entry only.
+    // Unknown types are rejected — create them first via upsert_doc_type.
+    const spec = docType !== null ? this.docTypes.get(docType) : undefined;
+    if (docType !== null && spec === undefined) {
+      throw new ValidationError(
+        `unknown doc_type "${docType}": create it first with upsert_doc_type (see list_doc_types), or omit doc_type`,
+      );
+    }
+
+    // Lifecycle governs superseding, not the type. Default from the type's hint
+    // when a known type is given, else 'singleton'. Overridable per document.
+    const lifecycle: Lifecycle = input.lifecycle ?? spec?.default_lifecycle ?? "singleton";
+    if (!isLifecycle(lifecycle)) {
+      throw new ValidationError(`lifecycle must be one of 'singleton' | 'history'`);
+    }
+
+    // Supersede prior versions only for singleton documents with a dedup key (§9.1).
+    const supersede = dedupKey !== null && lifecycle === "singleton" && (input.supersede ?? true);
 
     // Embedding is async; compute it before the synchronous transaction.
     const embedding = vecBlob(await this.embedder.embed(fullText));
@@ -179,10 +196,10 @@ export class DocumentStore {
     const tx = this.db.transaction(() => {
       const info = this.db
         .prepare(
-          `INSERT INTO documents (source_type, raw_path, full_text, doc_type, extracted, scope, valid_until, dedup_key)
-           VALUES (@sourceType, @rawPath, @fullText, @docType, @extracted, @scope, @validUntil, @dedupKey)`,
+          `INSERT INTO documents (source_type, raw_path, full_text, doc_type, lifecycle, extracted, scope, valid_until, dedup_key)
+           VALUES (@sourceType, @rawPath, @fullText, @docType, @lifecycle, @extracted, @scope, @validUntil, @dedupKey)`,
         )
-        .run({ sourceType, rawPath, fullText, docType, extracted: extractedJson, scope, validUntil, dedupKey });
+        .run({ sourceType, rawPath, fullText, docType, lifecycle, extracted: extractedJson, scope, validUntil, dedupKey });
       const id = Number(info.lastInsertRowid);
       this.syncSearchIndexes(id, fullText, docType, embedding);
 
@@ -285,7 +302,18 @@ export class DocumentStore {
       }
       next.extracted = patch.extracted;
     }
-    if (patch.doc_type !== undefined) next.doc_type = patch.doc_type;
+    if (patch.doc_type !== undefined) {
+      if (patch.doc_type !== null && !this.docTypes.isKnown(patch.doc_type)) {
+        throw new ValidationError(
+          `unknown doc_type "${patch.doc_type}": create it first with upsert_doc_type, or set null`,
+        );
+      }
+      next.doc_type = patch.doc_type;
+    }
+    if (patch.lifecycle !== undefined) {
+      if (!isLifecycle(patch.lifecycle)) throw new ValidationError(`lifecycle must be 'singleton' | 'history'`);
+      next.lifecycle = patch.lifecycle;
+    }
     if (patch.source_type !== undefined) next.source_type = patch.source_type;
     if (patch.raw_path !== undefined) next.raw_path = patch.raw_path;
     if (patch.deleted !== undefined) next.deleted = patch.deleted;
@@ -302,7 +330,7 @@ export class DocumentStore {
       this.db
         .prepare(
           `UPDATE documents SET source_type=@source_type, raw_path=@raw_path, full_text=@full_text,
-             doc_type=@doc_type, extracted=@extracted, scope=@scope, valid_until=@valid_until,
+             doc_type=@doc_type, lifecycle=@lifecycle, extracted=@extracted, scope=@scope, valid_until=@valid_until,
              deleted=@deleted, dedup_key=@dedup_key
            WHERE id=@id`,
         )
@@ -312,6 +340,7 @@ export class DocumentStore {
           raw_path: next.raw_path,
           full_text: next.full_text,
           doc_type: next.doc_type,
+          lifecycle: next.lifecycle,
           extracted: JSON.stringify(next.extracted),
           scope: next.scope,
           valid_until: next.valid_until,

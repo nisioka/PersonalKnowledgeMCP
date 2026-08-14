@@ -73,12 +73,14 @@ pnpm run build && pnpm start
 
 | ツール | 用途 | 備考 |
 |---|---|---|
-| `register` | 知識の登録 | `dedup_key` で旧版を supersede（履歴系 doc_type は対象外） |
+| `register` | 知識の登録 | `lifecycle=singleton` かつ `dedup_key` で旧版を supersede（`history` は対象外）。`doc_type` は null か既知語彙のみ（§9.5 v2） |
 | `search` | 検索 | `keyword`（既定、trigram FTS — 日英の部分一致・3文字以上）、`vector`、`hybrid`／履歴照会は `include_expired` |
-| `update` | フィールド上書き | **破壊的**：`confirm: true` がなければプレビューのみ（§9.4） |
+| `update` | フィールド上書き | **破壊的**：`confirm: true` がなければプレビューのみ（§9.4）。`lifecycle` も変更可 |
 | `delete` | アーカイブ／削除 | `mode: soft`（既定・可逆）/ `hard`／`confirm: true` まではプレビュー |
 | `restore` | アーカイブ解除 | soft delete を取り消す |
-| `list_doc_types` | 語彙一覧 | doc_type の表記ゆれを抑える（§9.5） |
+| `list_doc_types` | 語彙一覧 | doc_type 語彙は空スタート。表記ゆれを抑える（§9.5 v2） |
+| `upsert_doc_type` | 語彙の作成・編集 | doc_type を追加／更新。full トークン限定 |
+| `delete_doc_type` | 語彙の削除 | 使用中は拒否（`force` で強制）。full トークン限定 |
 
 加えて MCP プロンプト **`ingest_document`** を提供します（添付書類を Claude 自身に読み取らせ
 → 構造化 → `register` させる定型指示。後述「書類の取り込み」参照）。

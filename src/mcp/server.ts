@@ -15,7 +15,7 @@ import type { Principal } from "../config.js";
 import { AuthError } from "../auth/guard.js";
 import { DocumentStore, NotFoundError, ValidationError } from "../store/documents.js";
 import { DocTypeRegistry } from "../doctype/registry.js";
-import { SCOPES, type DocumentRow } from "../types.js";
+import { LIFECYCLES, SCOPES, type DocumentRow } from "../types.js";
 import { audit } from "../audit.js";
 import { SERVER_NAME, VERSION } from "../version.js";
 
@@ -26,6 +26,19 @@ export interface ToolContext {
 }
 
 const scopeEnum = z.enum(SCOPES);
+const lifecycleEnum = z.enum(LIFECYCLES);
+
+/**
+ * Mutating the shared doc_type vocabulary is a curator action, restricted to a
+ * principal with full scope coverage (the primary owner). Throws AuthError
+ * otherwise, which errorContent surfaces as a safe 403-style message.
+ */
+function requireVocabularyAdmin(principal: Principal): void {
+  const covers = SCOPES.every((s) => principal.scopes.includes(s));
+  if (!covers) {
+    throw new AuthError("changing the doc_type vocabulary requires a full-access token", 403);
+  }
+}
 
 function jsonContent(payload: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }] };
@@ -78,7 +91,14 @@ export function buildServer(ctx: ToolContext): McpServer {
         full_text: z.string().min(1).describe("The full text to store (OCR result or input text)."),
         source_type: z.string().optional().describe("Ingestion path, e.g. 'mcp' | 'discord'. Default 'mcp'."),
         raw_path: z.string().nullable().optional().describe("Path to the original file, if any."),
-        doc_type: z.string().nullable().optional().describe("Document type; see list_doc_types."),
+        doc_type: z
+          .string()
+          .nullable()
+          .optional()
+          .describe("Semantic label; must be null or a known type (see list_doc_types). Unknown types are rejected."),
+        lifecycle: lifecycleEnum
+          .optional()
+          .describe("'singleton' (latest wins, supersedes) or 'history' (keep every version). Default from the doc_type, else 'singleton'."),
         extracted: z.record(z.unknown()).optional().describe("Extracted metadata as a JSON object."),
         scope: scopeEnum.optional().describe("Target scope. Defaults to your token's default write scope."),
         valid_until: z
@@ -148,6 +168,7 @@ export function buildServer(ctx: ToolContext): McpServer {
         source_type: z.string().optional(),
         raw_path: z.string().nullable().optional(),
         doc_type: z.string().nullable().optional(),
+        lifecycle: lifecycleEnum.optional(),
         extracted: z.record(z.unknown()).optional(),
         scope: scopeEnum.optional(),
         valid_until: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -241,13 +262,76 @@ export function buildServer(ctx: ToolContext): McpServer {
     {
       title: "List doc_type vocabulary",
       description:
-        "List the known doc_type vocabulary so new documents reuse existing names rather than " +
-        "introducing spelling variants. Includes whether each type preserves history.",
+        "List the doc_type vocabulary so new documents reuse existing names rather than introducing " +
+        "spelling variants. The vocabulary starts empty and grows via upsert_doc_type; register only " +
+        "accepts a doc_type that is null or listed here. Each entry carries an advisory default_lifecycle.",
       inputSchema: {},
     },
     async () => {
       try {
         return jsonContent({ ok: true, doc_types: ctx.docTypes.list() });
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "upsert_doc_type",
+    {
+      title: "Create or edit a doc_type",
+      description:
+        "Add a new doc_type to the vocabulary, or edit an existing one. doc_type is a purely semantic " +
+        "label; its default_lifecycle is only an advisory prefill for register (the document's own " +
+        "lifecycle is what governs behavior). Requires a full-access token.",
+      inputSchema: {
+        name: z.string().min(1).describe("Canonical doc_type name (e.g. '製品保証')."),
+        description: z.string().optional().describe("Human description; also shown to extraction."),
+        default_lifecycle: lifecycleEnum
+          .optional()
+          .describe("Advisory default for register: 'singleton' (default) or 'history'."),
+        expiry_hint: z.string().optional().describe("How valid_until is usually estimated for this type."),
+      },
+    },
+    async (args) => {
+      try {
+        requireVocabularyAdmin(ctx.principal);
+        const spec = ctx.docTypes.upsert(args);
+        audit("doc_type.upsert", ctx.principal.name, { name: spec.name });
+        return jsonContent({ ok: true, doc_type: spec });
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "delete_doc_type",
+    {
+      title: "Delete a doc_type",
+      description:
+        "Remove a doc_type from the vocabulary. Refused if documents still use it, unless force=true. " +
+        "Removing a type never changes the documents themselves — their label just becomes 'unknown' " +
+        "again. Requires a full-access token.",
+      inputSchema: {
+        name: z.string().min(1).describe("doc_type name to remove."),
+        force: z.boolean().optional().describe("Remove even if documents still use it."),
+      },
+    },
+    async (args) => {
+      try {
+        requireVocabularyAdmin(ctx.principal);
+        const { removed, inUse } = ctx.docTypes.remove(args.name, args.force ?? false);
+        if (!removed && inUse > 0) {
+          return jsonContent({
+            ok: false,
+            removed: false,
+            in_use: inUse,
+            note: `doc_type "${args.name}" is used by ${inUse} document(s). Re-issue with force=true to remove it anyway.`,
+          });
+        }
+        audit("doc_type.delete", ctx.principal.name, { name: args.name, forced: args.force ?? false });
+        return jsonContent({ ok: true, removed, in_use: inUse });
       } catch (error) {
         return errorContent(error);
       }
@@ -268,10 +352,16 @@ export function buildServer(ctx: ToolContext): McpServer {
         "Does the OCR/extraction client-side (no API key needed).",
     },
     () => {
-      const vocab = ctx.docTypes
-        .list()
-        .map((d) => `- ${d.name}: ${d.description}（${d.keepHistory ? "履歴保持＝dedup_keyはnull" : "最新優先"}／${d.expiryHint}）`)
-        .join("\n");
+      const types = ctx.docTypes.list();
+      const vocab =
+        types.length === 0
+          ? "（まだ語彙は空です。無理に型を作らず doc_type: null で登録してよい）"
+          : types
+              .map(
+                (d) =>
+                  `- ${d.name}: ${d.description}（既定 lifecycle=${d.default_lifecycle}／${d.expiry_hint}）`,
+              )
+              .join("\n");
       const text = [
         "添付された書類（画像／PDF／テキスト）を読み取り、家庭内ナレッジベースに登録してください。",
         "",
@@ -281,16 +371,18 @@ export function buildServer(ctx: ToolContext): McpServer {
         "3. personal-knowledge の register ツールを呼ぶ。",
         "",
         "register に渡す値の決め方:",
-        "- full_text: 読み取った全文。",
-        "- doc_type: 下記の既定リストから最も近いものを選ぶ。無ければ簡潔な新しい日本語名を付ける（list_doc_types も参照可）。",
+        "- doc_type: 下記の既知リストに合うものがあればそれを使う。合うものが無ければ doc_type: null で登録する。",
+        "  同じ種類を今後も繰り返し登録すると分かっている場合に限り、先に upsert_doc_type で綺麗な意味名の型を作ってから使う（勝手に増やしすぎない）。",
+        "- lifecycle: 『最新だけ残す』情報は \"singleton\"、『毎回が記録として残る』情報（各年の税額・支出・日記など）は \"history\"。",
+        "  既知の doc_type を使う場合は省略すればその既定値が入る。判断できなければ singleton。",
         "- extracted: 読み取れた項目の JSON。日付は YYYY-MM-DD。発行日/イベント日は issued_date / event_date に入れる（登録日とは別物）。",
-        "- valid_until: 有効期限 YYYY-MM-DD。doc_type ごとの目安（下記）に従う。無期限なら \"9999-12-31\"。",
-        "- dedup_key: 「最新だけ残す」情報には論理キー（例 \"保育園:電話番号\"）。履歴を残す doc_type では null。",
+        "- valid_until: 有効期限 YYYY-MM-DD。無期限なら \"9999-12-31\"。lifecycle とは別概念（恒久情報は singleton ＋ 9999-12-31）。",
+        "- dedup_key: singleton で『最新だけ残す』情報には論理キー（例 \"保育園:電話番号\"）。history では null。",
         "- scope: 明確に共有/仕事のものでなければ private。",
         "",
         "破壊的操作ではないので register はそのまま実行してよい。複数書類なら1件ずつ register する。",
         "",
-        "既定の doc_type リスト:",
+        "既知の doc_type:",
         vocab,
       ].join("\n");
       return { messages: [{ role: "user", content: { type: "text", text } }] };
