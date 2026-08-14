@@ -1,67 +1,115 @@
 /**
  * doc_type vocabulary management (design §9.5).
  *
- * doc_type is not a free-for-all string: a loose default list keeps spelling
- * convergent ("学校手紙" not also "学校のお便り"/"プリント") so per-type rules
- * (dedup behavior, default expiry estimation) stay writable. New types are still
- * allowed, but tools surface the existing vocabulary so callers reuse it.
+ * doc_type is a purely *semantic* label with no system behavior attached — the
+ * behavior (superseding) is driven by each document's `lifecycle`, not its type.
+ * The vocabulary is persisted in the `doc_types` table and starts EMPTY: it is
+ * grown deliberately via `upsert_doc_type` as real usage reveals stable
+ * categories, rather than seeded with guessed buckets. `register` accepts a
+ * doc_type only when it is null or already in this vocabulary.
  */
+import type { DB } from "../db/index.js";
+import { type DocTypeSpec, type Lifecycle } from "../types.js";
 
-export interface DocTypeSpec {
-  /** Canonical name. */
+export type { DocTypeSpec };
+
+interface RawDocTypeRow {
   name: string;
-  /** Human description, also fed to the extraction prompt. */
   description: string;
-  /**
-   * If true, every version is history (each year's tax notice, past spending),
-   * so register never supersedes prior entries via dedup (§9.1).
-   */
-  keepHistory: boolean;
-  /** Hint for how `valid_until` should be estimated during extraction. */
-  expiryHint: string;
+  default_lifecycle: string;
+  expiry_hint: string;
+  source: string;
+  created_at: string;
 }
 
-/** Built-in starter vocabulary. Extend by editing this list as usage grows. */
-export const DEFAULT_DOC_TYPES: DocTypeSpec[] = [
-  { name: "保証書", description: "家電・製品の保証書", keepHistory: false, expiryHint: "保証終了日を valid_until に" },
-  { name: "自治体通知", description: "自治体からの通知・プリント", keepHistory: false, expiryHint: "対応期限や有効期限があれば valid_until に" },
-  { name: "学校手紙", description: "学校・園からのお便り", keepHistory: false, expiryHint: "提出期限やイベント開催日を valid_until に" },
-  { name: "イベント案内", description: "イベント・行事の案内", keepHistory: false, expiryHint: "開催日を valid_until に" },
-  { name: "連絡先", description: "電話番号・連絡先テンプレ", keepHistory: false, expiryHint: "通常は無期限（9999-12-31）" },
-  { name: "料金プラン", description: "サブスク・固定費の現行プラン", keepHistory: false, expiryHint: "通常は無期限。改定時は更新で差し替え" },
-  { name: "確定申告メモ", description: "確定申告・税務メモ", keepHistory: true, expiryHint: "年度情報。無期限で履歴として保持" },
-  { name: "固定資産税", description: "各年の固定資産税額", keepHistory: true, expiryHint: "年度情報。無期限で履歴として保持" },
-  { name: "支出記録", description: "家計・支出の記録", keepHistory: true, expiryHint: "履歴として保持" },
-  { name: "日記", description: "日記・ライフログ", keepHistory: true, expiryHint: "履歴として保持" },
-  { name: "メモ", description: "その他の一般メモ", keepHistory: false, expiryHint: "判断できなければ無期限" },
-];
+function parse(raw: RawDocTypeRow): DocTypeSpec {
+  return {
+    name: raw.name,
+    description: raw.description,
+    default_lifecycle: raw.default_lifecycle as Lifecycle,
+    expiry_hint: raw.expiry_hint,
+    source: raw.source as "builtin" | "user",
+    created_at: raw.created_at,
+  };
+}
 
+export interface UpsertDocType {
+  name: string;
+  description?: string;
+  default_lifecycle?: Lifecycle;
+  expiry_hint?: string;
+}
+
+/** DB-backed view of the doc_type vocabulary. */
 export class DocTypeRegistry {
-  private readonly byName = new Map<string, DocTypeSpec>();
-
-  constructor(specs: DocTypeSpec[] = DEFAULT_DOC_TYPES) {
-    for (const spec of specs) this.byName.set(spec.name, spec);
-  }
+  constructor(private readonly db: DB) {}
 
   list(): DocTypeSpec[] {
-    return [...this.byName.values()];
+    const rows = this.db
+      .prepare(`SELECT * FROM doc_types ORDER BY name`)
+      .all() as RawDocTypeRow[];
+    return rows.map(parse);
   }
 
   names(): string[] {
-    return [...this.byName.keys()];
+    return (this.db.prepare(`SELECT name FROM doc_types ORDER BY name`).all() as { name: string }[]).map(
+      (r) => r.name,
+    );
   }
 
   get(name: string | null | undefined): DocTypeSpec | undefined {
-    return name ? this.byName.get(name) : undefined;
+    if (!name) return undefined;
+    const row = this.db.prepare(`SELECT * FROM doc_types WHERE name = ?`).get(name) as
+      | RawDocTypeRow
+      | undefined;
+    return row ? parse(row) : undefined;
   }
 
-  /** Whether a doc_type preserves history (and so is never auto-superseded). */
-  keepsHistory(name: string | null | undefined): boolean {
-    return this.get(name)?.keepHistory ?? false;
-  }
-
-  /** Known vocabulary plus whether the given type is new (for caller guidance). */
   isKnown(name: string | null | undefined): boolean {
-    return !!name && this.byName.has(name);
+    return !!name && !!this.db.prepare(`SELECT 1 FROM doc_types WHERE name = ?`).get(name);
+  }
+
+  /** Create or update a vocabulary entry. Returns the resulting spec. */
+  upsert(input: UpsertDocType): DocTypeSpec {
+    const name = input.name.trim();
+    if (name.length === 0) throw new Error("doc_type name is required");
+    const existing = this.get(name);
+    // Preserve an existing entry's provenance/created_at; new ones are 'user'.
+    this.db
+      .prepare(
+        `INSERT INTO doc_types (name, description, default_lifecycle, expiry_hint, source)
+           VALUES (@name, @description, @default_lifecycle, @expiry_hint, 'user')
+         ON CONFLICT(name) DO UPDATE SET
+           description = excluded.description,
+           default_lifecycle = excluded.default_lifecycle,
+           expiry_hint = excluded.expiry_hint`,
+      )
+      .run({
+        name,
+        description: input.description ?? existing?.description ?? "",
+        default_lifecycle: input.default_lifecycle ?? existing?.default_lifecycle ?? "singleton",
+        expiry_hint: input.expiry_hint ?? existing?.expiry_hint ?? "",
+      });
+    return this.get(name) as DocTypeSpec;
+  }
+
+  /** Number of non-deleted documents currently labelled with `name`. */
+  usageCount(name: string): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM documents WHERE doc_type = ? AND deleted = 0`)
+      .get(name) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Remove a vocabulary entry. Refuses if documents still use it unless `force`.
+   * Removing the entry never touches the documents themselves — their `doc_type`
+   * label is free text and simply becomes "unknown" again.
+   */
+  remove(name: string, force = false): { removed: boolean; inUse: number } {
+    const inUse = this.usageCount(name);
+    if (inUse > 0 && !force) return { removed: false, inUse };
+    const info = this.db.prepare(`DELETE FROM doc_types WHERE name = ?`).run(name);
+    return { removed: info.changes > 0, inUse };
   }
 }

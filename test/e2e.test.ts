@@ -63,17 +63,21 @@ describe("MCP server over HTTP", () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "delete",
+      "delete_doc_type",
       "list_doc_types",
       "register",
       "restore",
       "search",
       "update",
+      "upsert_doc_type",
     ]);
     await client.close();
   });
 
   it("registers then finds a document", async () => {
     const client = await connect("full-token");
+    // doc_type vocabulary is strict (§9.5): create it before using it.
+    await client.callTool({ name: "upsert_doc_type", arguments: { name: "連絡先" } });
     const reg = await client.callTool({
       name: "register",
       arguments: { full_text: "保育園の電話番号は03-1234-5678", doc_type: "連絡先", scope: "shared" },
@@ -140,15 +144,58 @@ describe("MCP server over HTTP", () => {
     await client.close();
   });
 
-  it("lists the doc_type vocabulary", async () => {
+  it("grows the vocabulary via upsert_doc_type (roundtrip)", async () => {
+    // Note: the e2e DB is shared across tests, so this asserts the upsert→list
+    // roundtrip rather than global emptiness (empty-start is covered in store.test).
     const client = await connect("full-token");
-    const res = await client.callTool({ name: "list_doc_types", arguments: {} });
-    const payload = JSON.parse(textOf(res));
-    expect(payload.doc_types.some((d: { name: string }) => d.name === "保証書")).toBe(true);
+    const up = await client.callTool({
+      name: "upsert_doc_type",
+      arguments: { name: "製品保証", description: "家電・製品の保証", default_lifecycle: "singleton" },
+    });
+    expect(JSON.parse(textOf(up)).doc_type.name).toBe("製品保証");
+
+    const after = JSON.parse(textOf(await client.callTool({ name: "list_doc_types", arguments: {} })));
+    expect(after.doc_types.some((d: { name: string }) => d.name === "製品保証")).toBe(true);
     await client.close();
   });
 
-  it("exposes the ingest_document prompt with the doc_type vocabulary", async () => {
+  it("register rejects an unknown doc_type (strict vocabulary)", async () => {
+    const client = await connect("full-token");
+    const reg = await client.callTool({
+      name: "register",
+      arguments: { full_text: "x", doc_type: "存在しない型", scope: "shared" },
+    });
+    expect(reg.isError).toBe(true);
+    expect(textOf(reg)).toMatch(/unknown doc_type/);
+    await client.close();
+  });
+
+  it("delete_doc_type refuses while in use, then succeeds with force", async () => {
+    const client = await connect("full-token");
+    await client.callTool({ name: "upsert_doc_type", arguments: { name: "一時型" } });
+    await client.callTool({
+      name: "register",
+      arguments: { full_text: "使用中ドキュメント inuse", doc_type: "一時型", scope: "shared" },
+    });
+    const refused = JSON.parse(textOf(await client.callTool({ name: "delete_doc_type", arguments: { name: "一時型" } })));
+    expect(refused.removed).toBe(false);
+    expect(refused.in_use).toBe(1);
+
+    const forced = JSON.parse(
+      textOf(await client.callTool({ name: "delete_doc_type", arguments: { name: "一時型", force: true } })),
+    );
+    expect(forced.removed).toBe(true);
+    await client.close();
+  });
+
+  it("restricts vocabulary mutation to a full-access token", async () => {
+    const client = await connect("family-token");
+    const res = await client.callTool({ name: "upsert_doc_type", arguments: { name: "家族が作る型" } });
+    expect(res.isError).toBe(true);
+    await client.close();
+  });
+
+  it("exposes the ingest_document prompt (guidance, empty vocabulary)", async () => {
     const client = await connect("full-token");
     const { prompts } = await client.listPrompts();
     expect(prompts.map((p) => p.name)).toContain("ingest_document");
@@ -156,7 +203,7 @@ describe("MCP server over HTTP", () => {
     const got = await client.getPrompt({ name: "ingest_document" });
     const text = got.messages.map((m) => (m.content as { type: string; text: string }).text).join("\n");
     expect(text).toContain("register");
-    expect(text).toContain("保証書");
+    expect(text).toContain("lifecycle");
     await client.close();
   });
 });

@@ -2,8 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { openDatabase, type DB } from "../src/db/index.js";
 import { HashingEmbedder } from "../src/embedding.js";
 import { DocumentStore, ValidationError, todayLocal } from "../src/store/documents.js";
+import { DocTypeRegistry } from "../src/doctype/registry.js";
 import { AuthError } from "../src/auth/guard.js";
 import type { Principal } from "../src/config.js";
+import type { Lifecycle } from "../src/types.js";
 
 const full: Principal = { name: "full", scopes: ["private", "work", "shared"], defaultWriteScope: "private" };
 const work: Principal = { name: "work", scopes: ["work", "shared"], defaultWriteScope: "work" };
@@ -20,12 +22,18 @@ function dayOffset(days: number): string {
 describe("DocumentStore", () => {
   let db: DB;
   let store: DocumentStore;
+  let vocab: DocTypeRegistry;
 
   beforeEach(() => {
     db = openDatabase(":memory:", { embeddingDim: DIM, ensureDir: false });
-    store = new DocumentStore(db, new HashingEmbedder(DIM));
+    vocab = new DocTypeRegistry(db);
+    store = new DocumentStore(db, new HashingEmbedder(DIM), vocab);
   });
   afterEach(() => db.close());
+
+  /** Seed a vocabulary entry so register() will accept it (§9.5 is strict). */
+  const seedType = (name: string, default_lifecycle: Lifecycle = "singleton") =>
+    vocab.upsert({ name, default_lifecycle });
 
   it("registers a document with defaults", async () => {
     const { document: doc } = await store.register(full, { full_text: "自宅の住所は東京都です" });
@@ -57,11 +65,42 @@ describe("DocumentStore", () => {
   });
 
   it("finds documents by keyword within scope", async () => {
+    seedType("保証書");
     await store.register(full, { full_text: "電子レンジの保証書 保証期限あり", doc_type: "保証書", scope: "private" });
     const hits = await store.search(full, { query: "保証書" });
     expect(hits.length).toBe(1);
     expect(hits[0]!.doc_type).toBe("保証書");
     expect(hits[0]!.snippet).toContain("保証書");
+  });
+
+  it("starts with an empty doc_type vocabulary (§9.5)", () => {
+    expect(vocab.list()).toEqual([]);
+  });
+
+  it("rejects an unknown doc_type (vocabulary is strict, §9.5)", async () => {
+    await expect(
+      store.register(full, { full_text: "x", doc_type: "未登録タイプ" }),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("register inherits lifecycle from the type's default", async () => {
+    seedType("日記", "history");
+    const { document } = await store.register(full, { full_text: "今日の記録 diarykey", doc_type: "日記" });
+    expect(document.lifecycle).toBe("history");
+  });
+
+  it("delete_doc_type via registry refuses while in use, allows with force", async () => {
+    seedType("一時型");
+    await store.register(full, { full_text: "in use doc", doc_type: "一時型" });
+    expect(vocab.remove("一時型")).toEqual({ removed: false, inUse: 1 });
+    expect(vocab.remove("一時型", true)).toEqual({ removed: true, inUse: 1 });
+    expect(vocab.isKnown("一時型")).toBe(false);
+  });
+
+  it("accepts doc_type null (untyped) without seeding", async () => {
+    const { document } = await store.register(full, { full_text: "未分類のメモ" });
+    expect(document.doc_type).toBeNull();
+    expect(document.lifecycle).toBe("singleton");
   });
 
   it("hides other scopes from a limited token", async () => {
@@ -99,6 +138,8 @@ describe("DocumentStore", () => {
   });
 
   it("filters by doc_type", async () => {
+    seedType("学校手紙");
+    seedType("保証書");
     await store.register(full, { full_text: "手紙A letter", doc_type: "学校手紙" });
     await store.register(full, { full_text: "保証書A letter", doc_type: "保証書" });
     const hits = await store.search(full, { query: "letter", doc_type: "保証書" });
@@ -126,7 +167,8 @@ describe("DocumentStore", () => {
     expect(Array.isArray(hits)).toBe(true);
   });
 
-  it("supersedes prior versions via dedup_key (non-history doc_type)", async () => {
+  it("supersedes prior versions via dedup_key (singleton lifecycle)", async () => {
+    seedType("連絡先");
     const first = await store.register(full, {
       full_text: "保育園の電話番号 03-1111 numkey",
       doc_type: "連絡先",
@@ -139,6 +181,7 @@ describe("DocumentStore", () => {
       dedup_key: "保育園:電話",
       scope: "shared",
     });
+    expect(first.document.lifecycle).toBe("singleton");
     expect(second.superseded).toContain(first.document.id);
 
     const hits = await store.search(family, { query: "numkey" });
@@ -146,17 +189,30 @@ describe("DocumentStore", () => {
     expect(hits[0]!.snippet).toContain("03-2222");
   });
 
-  it("does NOT supersede for history-preserving doc_types", async () => {
+  it("does NOT supersede for history lifecycle (even with a dedup_key)", async () => {
+    seedType("固定資産税", "history");
     const a = await store.register(full, {
       full_text: "2025年の固定資産税 taxkey", doc_type: "固定資産税", dedup_key: "固定資産税",
     });
     const b = await store.register(full, {
       full_text: "2026年の固定資産税 taxkey", doc_type: "固定資産税", dedup_key: "固定資産税",
     });
+    expect(a.document.lifecycle).toBe("history"); // inherited from the type's default
     expect(b.superseded).toHaveLength(0);
     const hits = await store.search(full, { query: "taxkey" });
     expect(hits.length).toBe(2);
-    void a;
+  });
+
+  it("lets a per-document lifecycle override the type default", async () => {
+    seedType("固定資産税", "history");
+    // Same type, but force singleton on this document → it DOES supersede.
+    const a = await store.register(full, {
+      full_text: "override one ovkey", doc_type: "固定資産税", dedup_key: "ov", lifecycle: "singleton",
+    });
+    const b = await store.register(full, {
+      full_text: "override two ovkey", doc_type: "固定資産税", dedup_key: "ov", lifecycle: "singleton",
+    });
+    expect(b.superseded).toContain(a.document.id);
   });
 
   it("updates a document and re-indexes new text", async () => {
@@ -189,6 +245,7 @@ describe("DocumentStore", () => {
   });
 
   it("drops superseded/deleted docs from the vector index (no KNN pollution)", async () => {
+    seedType("連絡先");
     // Same text repeatedly; only the live row should survive in the vec index.
     await store.register(full, { full_text: "knnpollute alpha", doc_type: "連絡先", dedup_key: "k", scope: "shared" });
     await store.register(full, { full_text: "knnpollute alpha", doc_type: "連絡先", dedup_key: "k", scope: "shared" });
@@ -207,6 +264,7 @@ describe("DocumentStore", () => {
   });
 
   it("finds upcoming expiries within a window", async () => {
+    seedType("保証書");
     await store.register(full, { full_text: "保証 soon", valid_until: dayOffset(5), doc_type: "保証書" });
     await store.register(full, { full_text: "保証 far", valid_until: dayOffset(60), doc_type: "保証書" });
     await store.register(full, { full_text: "no expiry" }); // sentinel, excluded
