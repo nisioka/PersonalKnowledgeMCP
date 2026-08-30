@@ -1,9 +1,43 @@
 # Personal Knowledge MCP
 
-MCP 経由で Claude から使える「家庭内ナレッジベース」です。家庭の情報（保証書、
-学校のお便り、自治体通知、連絡先、ライフログなど）を蓄積し、Claude から検索・登録
-でき、書類は Claude 自身に読み取らせて構造化登録、期限が近づくと能動的にリマインド
-します——提案を我が家の実状況に基づかせるための基盤です。
+自分のための知識ベースを自分のマシンに置き、MCP 経由で Claude から検索・登録できる
+ようにするサーバーです。保証書・お知らせ・通知・連絡先・ライフログのような「後で
+参照したいが、どこかのサービスに預けたくはない」情報を対象にしています。
+
+- **書類はそのまま渡せる。** 画像・PDF・テキストを Claude に添付して MCP プロンプト
+  `ingest_document` を実行すると、Claude 自身が読み取って構造化し登録します。OCR も
+  抽出も Claude がやるので、別途 API キーも外部サービスも要りません
+- **期限を持った知識を扱える。** 保証期限や提出期限を `valid_until` として持ち、
+  既定の検索は期限切れを返しません。期限が近づくと Discord へ能動的に通知します
+- **誰が何を見られるかはサーバーが決める。** アクセストークンごとに `private` /
+  `work` / `shared` のスコープを固定し、クライアント側からは選べません
+- **データは出ていかない。** SQLite ファイル1つが実体で、置き場所はあなたのマシン
+  です。任意で SQLCipher による保存時暗号化と、暗号化した Google Drive バックアップ
+
+<details>
+<summary><b>English summary</b>（要約のみ。本文は日本語です / summary only, the rest of this README is in Japanese）</summary>
+
+A self-hosted MCP server that turns a private SQLite database into a knowledge
+base Claude can search and write to over Streamable HTTP.
+
+- **Document intake without an API key.** Attach an image/PDF/text file in
+  Claude and run the `ingest_document` MCP prompt: Claude reads the document,
+  structures it, and calls `register`. No OCR service, no `ANTHROPIC_API_KEY`.
+- **Expiry-aware knowledge.** Every record carries a `valid_until` date; the
+  default search hides expired entries, and a daily job posts upcoming
+  expiries to a Discord webhook.
+- **Server-side scope enforcement.** Each bearer token is pinned to a set of
+  scopes (`private` / `work` / `shared`); clients cannot choose their own.
+- **Your data stays local.** One SQLite file on your own machine, with optional
+  SQLCipher at-rest encryption and encrypted Google Drive backups.
+
+Tools: `register`, `search`, `update`, `delete`, `restore`, `list_doc_types`,
+`upsert_doc_type`, `delete_doc_type`, plus the `ingest_document` prompt.
+Install with `npm i -g personal-knowledge-mcp`, run `pk-mcp`, and point an MCP
+client at `http://127.0.0.1:8848/mcp`. See the sections below for details; the
+operations manual (`docs/operations.md`) is Japanese only.
+
+</details>
 
 システム全体の設計は [`docs/design.md`](docs/design.md) を参照してください。ロード
 マップ（設計 §8）の4フェーズを実装済みです（書類取り込みは設計当初の自前 Discord bot
@@ -11,6 +45,96 @@ MCP 経由で Claude から使える「家庭内ナレッジベース」です�
 
 **実際に運用するための手順書は [`docs/operations.md`](docs/operations.md)**（セットアップ→
 外部公開→バックアップ→リマインダーを実コマンド付きで順に解説）。
+
+## デモ
+
+<!-- TODO: 実際に Claude から register / search を叩いている様子の GIF をここに置く。
+     画面録画が要るため未収録。 -->
+
+_未収録です。_ 実際に動かしている様子の GIF は、画面録画が必要なためまだありません。
+
+## インストール
+
+Node.js ≥ 20 が必要です。ネイティブモジュール（SQLCipher 入り SQLite）を含むため、
+初回インストールではビルド済みバイナリの取得が走ります。
+
+```bash
+# 常駐させる場合
+npm install -g personal-knowledge-mcp
+pk-mcp
+
+# 試すだけなら
+npx personal-knowledge-mcp
+```
+
+起動すると `http://127.0.0.1:8848/mcp` で Streamable HTTP を待ち受けます。DB は
+`PK_DB_PATH`（既定 `data/knowledge.db`）に自動で作られます。
+
+`PK_TOKENS` を設定しないうちは組み込みの開発用トークン（`full-dev-token` /
+`work-dev-token` / `family-dev-token`）で動きます。**ループバック以外に晒さないで
+ください。** 実運用の手順は [`docs/operations.md`](docs/operations.md) にあります。
+
+## MCP クライアントの設定
+
+本サーバーは stdio ではなく **Streamable HTTP** です。先に `pk-mcp` を起動しておき、
+クライアントからその URL に繋ぎます。
+
+### Claude Code
+
+```bash
+claude mcp add --transport http personal-knowledge \
+  http://127.0.0.1:8848/mcp \
+  --header "Authorization: Bearer full-dev-token"
+```
+
+プロジェクトに `.mcp.json` を置く場合:
+
+```json
+{
+  "mcpServers": {
+    "personal-knowledge": {
+      "type": "http",
+      "url": "http://127.0.0.1:8848/mcp",
+      "headers": {
+        "Authorization": "Bearer full-dev-token"
+      }
+    }
+  }
+}
+```
+
+### Claude デスクトップ / claude.ai / モバイルアプリ
+
+「カスタムコネクタ」として登録します。コネクタの URL は **Claude のクラウドから
+到達できる必要がある**ため、`127.0.0.1` は指定できません。自宅サーバーを
+Cloudflare Tunnel + Access の背後に置いて公開ホスト名を与える手順が
+[`docs/operations.md`](docs/operations.md) の §5〜§6 にあります。
+
+なお `claude_desktop_config.json` について、公式ドキュメントが例示しているのは
+`command` / `args` で起動する stdio サーバーだけです。HTTP サーバーを同ファイルから
+繋げるかは確認できていないため、デスクトップからは Claude Code 経由か、上記の
+カスタムコネクタを使ってください。
+
+## 環境変数
+
+`.env` か環境変数で渡します。すべて任意で、既定値のまま起動できます。完全な一覧は
+[`.env.example`](.env.example) を参照してください。
+
+| 変数 | 用途 | 既定 |
+|---|---|---|
+| `PK_HOST` | 待ち受けアドレス。LAN の他ホストから直接叩かせるとき以外は変えない | `127.0.0.1` |
+| `PK_PORT` | 待ち受けポート | `8848` |
+| `PK_DB_PATH` | SQLite ファイルの場所。リポジトリ外の絶対パスを推奨 | `data/knowledge.db` |
+| `PK_EMBEDDING_DIM` | 埋め込みベクトルの次元。DB 作成時に固定され、変更には作り直しが要る | `256` |
+| `PK_TOKENS` | Bearer トークン → principal（名前・スコープ）の JSON。未設定なら開発用トークン | 開発用 |
+| `PK_DB_PASSPHRASE` | SQLCipher の合言葉。設定すると DB ファイル全体を暗号化する。**失うと復元不能** | なし（平文） |
+| `PK_TRUST_ACCESS_HEADER` | `Cf-Access-Authenticated-User-Email` を信頼する。**Cloudflare Access の背後でのみ** | `false` |
+| `PK_ACCESS_EMAILS` | 認証済みメール → principal の JSON。`PK_TRUST_ACCESS_HEADER=true` のときだけ効く | なし |
+| `PK_BACKUP_PASSPHRASE` | バックアップの暗号化パスフレーズ。バックアップ／リストアに必須 | なし |
+| `PK_BACKUP_FOLDER_ID` | アップロード先の Google Drive フォルダ ID | なし |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Google サービスアカウント JSON のパス | なし |
+| `PK_REMINDER_DAYS` | 何日先までの期限をリマインドするか | `14` |
+| `PK_REMINDER_WEBHOOK` | リマインダーの通知先 Discord webhook | なし（通知しない） |
 
 ## 実装状況
 
@@ -42,9 +166,9 @@ Claude が書類を読取り ─┐                                          Cla
 抽出済み JSON をペアで保持**する／ライフサイクルは状態遷移 cron ではなく **日付フィルタ**
 （`valid_until`）で扱う。
 
-## セットアップ
+## 開発環境のセットアップ
 
-Node.js ≥ 22.13 と pnpm が必要です（pnpm は `corepack enable pnpm` で入ります。`pnpm@11.8.0` が Node ≥ 22.13 を要求します）。
+ソースから動かす場合です。Node.js ≥ 22.13 と pnpm が必要です（pnpm は `corepack enable pnpm` で入ります。`pnpm@11.8.0` が Node ≥ 22.13 を要求します）。
 
 ```bash
 pnpm install
@@ -84,14 +208,6 @@ pnpm run build && pnpm start
 
 加えて MCP プロンプト **`ingest_document`** を提供します（添付書類を Claude 自身に読み取らせ
 → 構造化 → `register` させる定型指示。後述「書類の取り込み」参照）。
-
-### Claude Code から接続
-
-```bash
-claude mcp add --transport http personal-knowledge \
-  http://localhost:8848/mcp \
-  --header "Authorization: Bearer full-dev-token"
-```
 
 ### ライフサイクルと名寄せ
 
@@ -198,8 +314,7 @@ src/
   backup/              AES-256-GCM 暗号、Drive バックアップ/リストア、CLI
   reminders/           期限スキャン → Discord webhook、CLI
 deploy/                Cloudflare Tunnel 設定 + systemd ユニット/タイマー
+server.json            MCP レジストリ登録用マニフェスト
 test/                  guard・store・config・backup・reminder・HTTP e2e テスト
 docs/design.md         システム全体の設計
 ```
-
-sed -e "s|__USER__|$APP_USER|g" -e "s|__APP_DIR__|$APP_DIR|g" deploy/systemd/personalknowledge-tunnel.service | sudo tee /etc/systemd/system/personalknowledge-tunnel.service > /dev/null

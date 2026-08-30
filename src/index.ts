@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * HTTP entrypoint. Exposes the MCP server over Streamable HTTP at POST /mcp.
  *
@@ -20,6 +21,8 @@ import { buildServer } from "./mcp/server.js";
 import { audit } from "./audit.js";
 import { redactString } from "./redact.js";
 import { SERVER_NAME, VERSION } from "./version.js";
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 function jsonRpcError(res: Response, status: number, message: string): void {
   res.status(status).json({
@@ -111,7 +114,25 @@ function main(): void {
   });
 }
 
-// Run only when executed directly (not when imported by tests).
-if (import.meta.url === `file://${process.argv[1]}`) {
+/**
+ * True when this file is the process entrypoint (as opposed to being imported
+ * by tests). `process.argv[1]` cannot be compared to `import.meta.url` as a raw
+ * string: npm installs `bin` entries as a symlink in `node_modules/.bin`, so
+ * `npx pk-mcp` passes the symlink path while `import.meta.url` is the real
+ * file — the naive comparison is false and the server silently never starts.
+ * Resolving the symlink and encoding through `pathToFileURL` also handles paths
+ * with spaces or non-ASCII characters, which `file://${...}` leaves unescaped.
+ */
+function isMain(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false; // `node -e`, REPL
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(entry)).href;
+  } catch {
+    return false; // entry was deleted or is not a real path
+  }
+}
+
+if (isMain()) {
   main();
 }
