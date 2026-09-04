@@ -11,8 +11,9 @@
   既定の検索は期限切れを返しません。期限が近づくと Discord へ能動的に通知します
 - **誰が何を見られるかはサーバーが決める。** アクセストークンごとに `private` /
   `work` / `shared` のスコープを固定し、クライアント側からは選べません
-- **データは出ていかない。** SQLite ファイル1つが実体で、置き場所はあなたのマシン
-  です。任意で SQLCipher による保存時暗号化と、暗号化した Google Drive バックアップ
+- **置き場所はあなたのマシン。** SQLite ファイル1つが実体です。任意で SQLCipher に
+  よる保存時暗号化を掛けられます。マシンの外に出るのは Google Drive バックアップを
+  有効にしたときだけで、そのとき送られるのは暗号化済みのバックアップです
 
 <details>
 <summary><b>English summary</b>（要約のみ。本文は日本語です / summary only, the rest of this README is in Japanese）</summary>
@@ -28,8 +29,9 @@ base Claude can search and write to over Streamable HTTP.
   expiries to a Discord webhook.
 - **Server-side scope enforcement.** Each bearer token is pinned to a set of
   scopes (`private` / `work` / `shared`); clients cannot choose their own.
-- **Your data stays local.** One SQLite file on your own machine, with optional
-  SQLCipher at-rest encryption and encrypted Google Drive backups.
+- **Your data lives on your own machine.** One SQLite file, with optional
+  SQLCipher at-rest encryption. Nothing leaves the machine unless you turn on
+  the Google Drive backup, which uploads an encrypted copy.
 
 Tools: `register`, `search`, `update`, `delete`, `restore`, `list_doc_types`,
 `upsert_doc_type`, `delete_doc_type`, plus the `ingest_document` prompt.
@@ -70,9 +72,12 @@ npx personal-knowledge-mcp
 起動すると `http://127.0.0.1:8848/mcp` で Streamable HTTP を待ち受けます。DB は
 `PK_DB_PATH`（既定 `data/knowledge.db`）に自動で作られます。
 
-`PK_TOKENS` を設定しないうちは組み込みの開発用トークン（`full-dev-token` /
-`work-dev-token` / `family-dev-token`）で動きます。**ループバック以外に晒さないで
-ください。** 実運用の手順は [`docs/operations.md`](docs/operations.md) にあります。
+`PK_TOKENS` を設定しないうちは組み込みの開発用トークン `full-dev-token` /
+`work-dev-token` / `family-dev-token` で動きます。**これらはパッケージに同梱された
+公開の値なので、ループバックの外では認証になりません。** `PK_HOST` をループバック
+以外にしたまま起動しようとすると、サーバーは待ち受けずに終了します。LAN や公開ホスト
+に出すなら `PK_TOKENS` に自分の秘密を設定してください。実運用の手順は
+[`docs/operations.md`](docs/operations.md) にあります。
 
 ## MCP クライアントの設定
 
@@ -122,11 +127,11 @@ Cloudflare Tunnel + Access の背後に置いて公開ホスト名を与える�
 
 | 変数 | 用途 | 既定 |
 |---|---|---|
-| `PK_HOST` | 待ち受けアドレス。LAN の他ホストから直接叩かせるとき以外は変えない | `127.0.0.1` |
+| `PK_HOST` | 待ち受けアドレス。LAN の他ホストから直接叩かせるとき以外は変えない。ループバック以外にするには `PK_TOKENS` が要る | `127.0.0.1` |
 | `PK_PORT` | 待ち受けポート | `8848` |
 | `PK_DB_PATH` | SQLite ファイルの場所。リポジトリ外の絶対パスを推奨 | `data/knowledge.db` |
 | `PK_EMBEDDING_DIM` | 埋め込みベクトルの次元。DB 作成時に固定され、変更には作り直しが要る | `256` |
-| `PK_TOKENS` | Bearer トークン → principal（名前・スコープ）の JSON。未設定なら開発用トークン | 開発用 |
+| `PK_TOKENS` | Bearer トークン → principal の JSON。principal は `name` / `scopes` / `defaultWriteScope` を持つ。未設定なら開発用トークンで、ループバック限定 | 開発用 |
 | `PK_DB_PASSPHRASE` | SQLCipher の合言葉。設定すると DB ファイル全体を暗号化する。**失うと復元不能** | なし（平文） |
 | `PK_TRUST_ACCESS_HEADER` | `Cf-Access-Authenticated-User-Email` を信頼する。**Cloudflare Access の背後でのみ** | `false` |
 | `PK_ACCESS_EMAILS` | 認証済みメール → principal の JSON。`PK_TRUST_ACCESS_HEADER=true` のときだけ効く | なし |
@@ -135,6 +140,19 @@ Cloudflare Tunnel + Access の背後に置いて公開ホスト名を与える�
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google サービスアカウント JSON のパス | なし |
 | `PK_REMINDER_DAYS` | 何日先までの期限をリマインドするか | `14` |
 | `PK_REMINDER_WEBHOOK` | リマインダーの通知先 Discord webhook | なし（通知しない） |
+
+`PK_TOKENS` の形は次のとおりです。`shared` はどの principal にも自動で追加されます。
+`defaultWriteScope` は `register` / `update` がスコープを省略したときの書き込み先で、
+書かなければ `shared` 以外の最初のスコープになります。`scopes` に無い値を書くと起動時
+に落ちます。
+
+```json
+{
+  "<full-secret>":   { "name": "full",   "scopes": ["private", "work", "shared"], "defaultWriteScope": "private" },
+  "<work-secret>":   { "name": "work",   "scopes": ["work"], "defaultWriteScope": "work" },
+  "<family-secret>": { "name": "family", "scopes": ["shared"] }
+}
+```
 
 ## 実装状況
 
@@ -186,7 +204,7 @@ pnpm run build && pnpm start
 
 | コンポーネント | コマンド | 必要なもの |
 |---|---|---|
-| MCP サーバ | `pnpm start` | —（LAN は DEV トークン可） |
+| MCP サーバ | `pnpm start` | ループバックなら不要。LAN に出すなら `PK_TOKENS` |
 | バックアップ | `pnpm run backup` | `PK_BACKUP_PASSPHRASE`、`PK_BACKUP_FOLDER_ID`、Google 認証情報 |
 | リストア | `pnpm run restore [path]` | 同上 |
 | リマインダー | `pnpm run reminders` | `PK_REMINDER_WEBHOOK`（任意） |

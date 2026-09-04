@@ -38,7 +38,7 @@
         },
         {
           "name": "PK_HOST",
-          "description": "Bind address. Keep the loopback default unless the server sits behind an authenticating proxy.",
+          "description": "Bind address. A non-loopback value requires PK_TOKENS: with the built-in dev tokens the server exits instead of listening.",
           "default": "127.0.0.1"
         },
         {
@@ -49,7 +49,7 @@
         },
         {
           "name": "PK_TOKENS",
-          "description": "JSON map of bearer token to principal (name, scopes, defaultWriteScope). Unset falls back to built-in dev tokens, which are loopback-only.",
+          "description": "JSON map of bearer token to principal (name, scopes, defaultWriteScope). Unset falls back to built-in dev tokens, and the server then refuses to bind anywhere but loopback.",
           "isSecret": true,
           "placeholder": "{\"<secret>\":{\"name\":\"full\",\"scopes\":[\"private\",\"work\",\"shared\"],\"defaultWriteScope\":\"private\"}}"
         },
