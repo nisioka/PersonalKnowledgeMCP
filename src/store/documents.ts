@@ -21,9 +21,9 @@ import {
 import {
   NO_EXPIRY,
   isLifecycle,
-  type DateKind,
   type DocumentRow,
   type Lifecycle,
+  type PendingDate,
   type PendingDocument,
   type PendingParams,
   type PendingResult,
@@ -501,7 +501,7 @@ export class DocumentStore {
            WHERE doc_id = ? AND review_status = 'pending'
            ORDER BY date, id`,
         )
-        .all(doc_id) as { id: number; date: string; kind: DateKind; title: string }[];
+        .all(doc_id) as PendingDate[];
       const snippet = toSnippet(doc.full_text);
       const title =
         documentTitle(doc) ??
