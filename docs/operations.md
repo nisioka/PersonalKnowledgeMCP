@@ -264,6 +264,10 @@ PK_PORT=8849 PK_DB_PATH=~/.local/share/personal-knowledge/dev/dev.db pnpm run de
 1. Claude（Code / デスクトップ / アプリ）に書類の画像・PDF を添付する。
 2. MCP プロンプト **`ingest_document`** を実行する（または「この書類をナレッジベースに登録して」と指示）。
 3. Claude が全文を読み取り、`doc_type` や `valid_until` を判断して `register` を呼ぶ。
+4. 書類に書かれた日付（行事・締切・満了）は未承認の候補として登録される。Claude に
+   「未承認の日付を見せて」と頼むと `list_pending` で一覧が出るので、合っていれば承認、
+   読み取り違いは却下する（`review_dates`）。承認前の日付も `upcoming` には出る
+   （`review_status: pending`）。
 
 Discord から無人で投げたい場合は、**Claude Code の Discord 連携（Channels）**を併用すると、
 「Discord 添付 → ローカル Claude Code が読取り → `register`」が成立します（これも API キー不要）。

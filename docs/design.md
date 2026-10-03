@@ -112,6 +112,28 @@ documents
 ### 能動的提案への発展
 `extracted` / `valid_until` を日次cronで走査し、保証切れ・納期接近などをDiscordへ通知（後付け容易）。
 
+### 文書内の日付（doc_dates テーブル）
+「向こう数日の予定と期限」を引くには、日付が文書ごとにばらばらのキーで `extracted` に埋まっていては使えない。また、抽出した日付は読み取り違いがありうるので、人が確かめた印を持たせたい。そこで日付を文書本体から切り離し、1件1行で持つ。
+
+```sql
+doc_dates
+  id             -- 主キー
+  doc_id         -- 元の文書（documents.id）
+  date           -- 'YYYY-MM-DD'
+  kind           -- 'event'（行事）| 'deadline'（締切・提出）| 'expiry'（満了・有効期限）
+  title          -- 件名。通知にそのまま出す
+  source         -- 'extracted'（文書内の日付）| 'valid_until'
+  item_key       -- 再抽出時の照合用。date と正規化した title から作る
+  review_status  -- 'pending' | 'approved' | 'rejected'
+  reviewed_at    -- 承認・却下した日時
+```
+
+- **抽出**：`ingest_document` プロンプトで `extracted.dates: [{date, kind, title}]` を必ず出させる（共通キー）。件名は通知に載る前提で書かせ、番号類・金額は入れさせない。形が崩れた `extracted.dates` は `register` / `update` がエラーで返し、呼び出し側（Claude）に直させる。
+- **同期**：文書の登録・更新のたびに、`extracted.dates` と `valid_until`（`9999-12-31` 以外。`expiry` として）から行を作り直す。`doc_dates` は派生データで、このテーブルだけが持つのは承認状態（`review_status` / `reviewed_at`）。
+- **承認の引き継ぎ**：承認状態を `extracted` ではなくこのテーブルに置くので、再抽出しても消えない。`item_key` が一致した行は承認状態を引き継ぎ、一致しない新しい行は `pending` で入り、無くなった行は消える。`item_key` は日付と、全角半角・大文字小文字・空白・記号の違いを均した件名から作る。件名を書き換えた項目は別の項目として未承認に戻る。`valid_until` の行は件名を機械的に作る（「〈文書のタイトル〉の有効期限」）ので日付だけで照合する。
+- **文書の置き換え・削除**：行は消さず、参照時に `documents.deleted = 0` で外す（`restore` すれば戻る）。物理削除では行も消える。
+- **MCP ツール**：`upcoming`（期間内の日付を日付順に。返すのは日付・種別・件名・承認状態・`doc_id`・`scope` だけで、`search` と違い `extracted` の全体は返さない。却下済みは出さず、未承認は `review_status` 付きで出す）／`list_pending`（未承認を文書ごとにまとめ、文書のタイトルと行の id を添える。`doc_id` で1文書に絞れる）／`review_dates`（`approve_all` で文書の未承認分を一括承認、`reject_ids` で個別に却下。片方だけでも呼べる）。`review_dates` の権限は他の書き込み系ツールと同じ（文書の scope に書けるトークン）。
+
 ---
 
 ## 5. スコープ分割と認可
@@ -259,11 +281,11 @@ Claude経由で register / update / delete できるため、AIの誤解によ�
 
 **MCP ツール面。** `list_doc_types`（DB から返す）／`upsert_doc_type`（作成・編集、語彙ミューテーションは `full` principal 限定）／`delete_doc_type`（使用中なら件数を返して拒否、`force` で強制）。`register`・`update` は `lifecycle` を任意引数で受ける。`ingest_document` プロンプトは「`list_doc_types` を見て、適合が無ければ `doc_type: null` で登録するか、再利用したいなら先に `upsert_doc_type` で綺麗な意味名を作ってから register」とし、lifecycle（最新／履歴）と expiry を別概念として説明する。
 
-**スキーマの版管理。** この語彙モデル（`documents.lifecycle` 列＋`doc_types` テーブル）を**ベースライン（version 1）**とし、`PRAGMA user_version` ベースの軽量マイグレーション機構を土台として持つ。今回はまだ実運用データが少ないため、旧ハードコード語彙からのバックフィル移行は行わず、既存 DB は破棄して作り直す前提とする。将来スキーマを変えるときは `SCHEMA_VERSION` を上げて `migrate()` に段階的なステップを足す（この機構自体は残す）。
+**スキーマの版管理。** この語彙モデル（`documents.lifecycle` 列＋`doc_types` テーブル）を**ベースライン（version 1）**とし、`PRAGMA user_version` ベースの軽量マイグレーション機構を土台として持つ。今回はまだ実運用データが少ないため、旧ハードコード語彙からのバックフィル移行は行わず、既存 DB は破棄して作り直す前提とする。将来スキーマを変えるときは `SCHEMA_VERSION` を上げて `migrate()` に段階的なステップを足す（この機構自体は残す）。version 2 で `doc_dates` を足した（§4）。version 1 の DB は開いたときに、既存文書の `extracted.dates` と `valid_until` から `doc_dates` を作る。
 
 ### 9.6 「いつの情報か」と「いつ登録したか」の区別
 `created_at` は登録日時であり、情報自体の発生日（書類の発行日、イベント日）とは別物。「今年の情報か」を正しく判定するには情報側の日付が要る。
-- 情報の発生日（発行日・イベント日）は `extracted` JSON に持たせる（例：`issued_date`, `event_date`）
+- 情報の発生日（発行日）は `extracted` JSON に持たせる（`issued_date`）。予定・期限にあたる日付（行事・締切・満了）は `extracted.dates` に揃え、`doc_dates` へ同期する（§4）
 - `created_at`（登録日時）と混同しないよう、能動提案や履歴照会のロジックでは情報側の日付を参照する
 
 ### 9.7 当面は作り込まない（過剰回避）

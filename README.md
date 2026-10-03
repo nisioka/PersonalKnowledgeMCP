@@ -34,7 +34,8 @@ Claude が書類を読取り ─┐                                          Cla
 権限ガード (src/auth) ─┴──────┘                                   ▼
                                                                  MCP ツール (src/mcp): register,
 リマインダー cron ─► Discord webhook (src/reminders)             search, update, delete, restore,
-バックアップ cron ─► 暗号化 → Google Drive (src/backup)          list_doc_types, ＋prompt: ingest_document
+バックアップ cron ─► 暗号化 → Google Drive (src/backup)          list_doc_types, upcoming, list_pending,
+                                                                 review_dates, ＋prompt: ingest_document
 ```
 
 コードで強制している設計原則：**単一 DB** を `scope` で論理分割する／**アクセス可否は
@@ -81,6 +82,9 @@ pnpm run build && pnpm start
 | `list_doc_types` | 語彙一覧 | doc_type 語彙は空スタート。表記ゆれを抑える（§9.5 v2） |
 | `upsert_doc_type` | 語彙の作成・編集 | doc_type を追加／更新。full トークン限定 |
 | `delete_doc_type` | 語彙の削除 | 使用中は拒否（`force` で強制）。full トークン限定 |
+| `upcoming` | 期間内の予定・期限 | `from`〜`to`（既定は今日から10日間）の日付を日付順に返す。返すのは日付・種別・件名・承認状態・`doc_id`・`scope` だけ。却下済みと、置き換え・削除された文書の日付は出ない |
+| `list_pending` | 未承認の日付の一覧 | 文書ごとにまとめ、文書のタイトルと行の id を添える。`doc_id` で1文書に絞れる（登録・更新の直後に候補を取る用途） |
+| `review_dates` | 日付の承認・却下 | `approve_all` で文書の未承認分を一括承認、`reject_ids` で個別に却下。片方だけでも呼べる。書き込み権限は他の書き込み系ツールと同じ |
 
 加えて MCP プロンプト **`ingest_document`** を提供します（添付書類を Claude 自身に読み取らせ
 → 構造化 → `register` させる定型指示。後述「書類の取り込み」参照）。
@@ -101,6 +105,19 @@ claude mcp add --transport http personal-knowledge \
 - `dedup_key` により「最新だけ欲しい」情報（電話番号、現行プラン等）の更新で旧版を
   supersede できる。一方、履歴系 doc_type（各年の税額など）は supersede しない。
 
+### 文書内の日付と承認
+
+文書が言及する日付（行事・締切・満了）は、文書本体とは別の `doc_dates` テーブルに
+1件1行で持ちます（設計 §4）。
+
+- `register` / `update` のたびに、`extracted.dates`（`[{date, kind, title}]`）と
+  `valid_until`（`9999-12-31` 以外。種別は `expiry`）から同期する。
+- 入った日付は `pending`（未承認）。人が `review_dates` で `approved` / `rejected` にする。
+- 承認状態はこのテーブル側にあるので、文書を再抽出（`update`）しても消えない。日付と
+  件名が同じ項目は承認状態を引き継ぎ、件名が変わった項目は別の項目として未承認に戻る。
+- `upcoming` は未承認の日付も返す（`review_status` で見分けられる）。却下した日付だけが
+  出なくなる。
+
 ### 埋め込み — プレースホルダ
 
 決定的・オフラインの `HashingEmbedder` が API キーなしでベクトルパイプラインを動かし
@@ -117,8 +134,10 @@ OCR も内蔵で行え、PaddleOCR も外部サービスも `ANTHROPIC_API_KEY` 
 
 1. Claude に書類（画像/PDF/テキスト）を添付する。
 2. MCP プロンプト **`ingest_document`** を実行する（doc_type 語彙・期限推定・dedup_key の
-   付け方を指示済み）。
-3. Claude が全文を読み取り、構造化して `register` を呼ぶ。
+   付け方・書類内の日付の拾い方を指示済み）。
+3. Claude が全文を読み取り、構造化して `register` を呼ぶ。書類内の日付は
+   `extracted.dates` に入り、未承認の候補として登録される（`list_pending` →
+   `review_dates` で確認する）。
 
 Discord から無人で投げたい場合も、[Claude Code の Discord 連携（Channels）](https://azukiazusa.dev/blog/how-discord-integration-works/)
 を使えば同じ流れになります：Discord 添付 → Channels が `download_attachment` でローカル保存
@@ -190,10 +209,11 @@ src/
   audit.ts             1行の監査ログ
   embedding.ts         Embedder インターフェース + Phase 1 のハッシュ実装（暫定）
   auth/guard.ts        権限ガード + リクエストの principal 解決
-  db/index.ts          SQLite + FTS5（trigram）+ sqlite-vec スキーマ
+  db/index.ts          SQLite + FTS5（trigram）+ sqlite-vec スキーマ、版管理
   doctype/registry.ts  doc_type 語彙 + 履歴ルール
-  store/documents.ts   scope 強制の register/search/update/delete/restore + リマインダー
-  mcp/server.ts        MCP ツール（register/search/update/delete/restore/list_doc_types）
+  store/documents.ts   scope 強制の register/search/update/delete/restore + 日付の一覧・承認 + リマインダー
+  store/doc-dates.ts   doc_dates の同期（extracted.dates / valid_until → 行、承認状態の引き継ぎ）
+  mcp/server.ts        MCP ツール（register/search/update/delete/restore、語彙、日付）
   index.ts             Express + Streamable HTTP エントリポイント
   backup/              AES-256-GCM 暗号、Drive バックアップ/リストア、CLI
   reminders/           期限スキャン → Discord webhook、CLI
