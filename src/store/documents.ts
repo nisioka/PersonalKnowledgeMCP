@@ -1,5 +1,6 @@
 /**
- * Document store: the only place that reads/writes the `documents` table.
+ * Document store: the only place that reads/writes the `documents` table and
+ * its derived `doc_dates` rows.
  *
  * Every operation routes scope decisions through auth/guard so authorization
  * cannot be bypassed, and search always applies the default lifecycle filter
@@ -11,17 +12,33 @@ import type { Embedder } from "../embedding.js";
 import { DocTypeRegistry } from "../doctype/registry.js";
 import { resolveReadScopes, resolveWriteScope } from "../auth/guard.js";
 import {
+  documentTitle,
+  isValidYmd,
+  parseExtractedDates,
+  parseExtractedJson,
+  syncDocDates,
+} from "./doc-dates.js";
+import {
   NO_EXPIRY,
   isLifecycle,
+  type DateKind,
   type DocumentRow,
   type Lifecycle,
+  type PendingDocument,
+  type PendingParams,
+  type PendingResult,
   type RegisterInput,
   type RegisterResult,
+  type ReviewInput,
+  type ReviewResult,
+  type ReviewStatus,
   type Scope,
   type SearchHit,
   type SearchMode,
   type SearchParams,
+  type UpcomingDate,
   type UpcomingExpiry,
+  type UpcomingParams,
   type UpdatePatch,
 } from "../types.js";
 
@@ -32,16 +49,11 @@ export class NotFoundError extends Error {
   }
 }
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SNIPPET_LEN = 600;
-
-/** Format check PLUS calendar validity (rejects e.g. 2026-02-31). */
-function isValidYmd(value: string): boolean {
-  if (!DATE_RE.test(value)) return false;
-  const [y, m, d] = value.split("-").map(Number) as [number, number, number];
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
-}
+/** Fallback label length when a document has no title to show in `list_pending`. */
+const TITLE_SNIPPET_LEN = 40;
+/** `upcoming` looks this many days ahead when `to` is omitted. */
+const UPCOMING_DEFAULT_DAYS = 10;
 
 export class ValidationError extends Error {
   constructor(message: string) {
@@ -56,6 +68,18 @@ export function todayLocal(d: Date = new Date()): string {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+/** `days` after a `YYYY-MM-DD` date, as `YYYY-MM-DD`. */
+function addDays(ymd: string, days: number): string {
+  const [y, m, d] = ymd.split("-").map(Number) as [number, number, number];
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+/** Reject malformed `extracted.dates` on the way in, so the caller can fix them. */
+function assertValidDates(extracted: Record<string, unknown>): void {
+  const { problems } = parseExtractedDates(extracted);
+  if (problems.length > 0) throw new ValidationError(problems.join("; "));
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -100,13 +124,6 @@ interface RawDocRow {
 }
 
 function parseRow(raw: RawDocRow): DocumentRow {
-  let extracted: Record<string, unknown> = {};
-  try {
-    const parsed = JSON.parse(raw.extracted) as unknown;
-    if (parsed && typeof parsed === "object") extracted = parsed as Record<string, unknown>;
-  } catch {
-    // Corrupt JSON should not break a read; fall back to empty meta.
-  }
   return {
     id: raw.id,
     source_type: raw.source_type,
@@ -114,7 +131,7 @@ function parseRow(raw: RawDocRow): DocumentRow {
     full_text: raw.full_text,
     doc_type: raw.doc_type,
     lifecycle: raw.lifecycle as Lifecycle,
-    extracted,
+    extracted: parseExtractedJson(raw.extracted),
     scope: raw.scope as Scope,
     valid_until: raw.valid_until,
     deleted: raw.deleted !== 0,
@@ -165,7 +182,9 @@ export class DocumentStore {
     if (input.extracted !== undefined && (typeof input.extracted !== "object" || input.extracted === null)) {
       throw new ValidationError("extracted must be a JSON object");
     }
-    const extractedJson = JSON.stringify(input.extracted ?? {});
+    const extracted = input.extracted ?? {};
+    assertValidDates(extracted);
+    const extractedJson = JSON.stringify(extracted);
     const sourceType = input.source_type ?? "mcp";
     const rawPath = input.raw_path ?? null;
     const docType = input.doc_type ?? null;
@@ -202,6 +221,7 @@ export class DocumentStore {
         .run({ sourceType, rawPath, fullText, docType, lifecycle, extracted: extractedJson, scope, validUntil, dedupKey });
       const id = Number(info.lastInsertRowid);
       this.syncSearchIndexes(id, fullText, docType, embedding);
+      syncDocDates(this.db, { id, extracted, raw_path: rawPath, doc_type: docType, valid_until: validUntil });
 
       let superseded: number[] = [];
       if (supersede) {
@@ -300,6 +320,7 @@ export class DocumentStore {
       if (typeof patch.extracted !== "object" || patch.extracted === null) {
         throw new ValidationError("extracted must be a JSON object");
       }
+      assertValidDates(patch.extracted);
       next.extracted = patch.extracted;
     }
     if (patch.doc_type !== undefined) {
@@ -350,6 +371,8 @@ export class DocumentStore {
       if (next.deleted) this.dropSearchIndexes(id);
       else if (reembed && embedding) this.syncSearchIndexes(id, next.full_text, next.doc_type, embedding);
       else this.db.prepare(`UPDATE documents_fts SET doc_type = ? WHERE rowid = ?`).run(next.doc_type ?? "", id);
+      // Re-extraction lands here: reviews carry over to dates whose item_key is unchanged.
+      syncDocDates(this.db, next);
     });
     tx();
     return parseRow(this.db.prepare(`SELECT * FROM documents WHERE id = ?`).get(id) as RawDocRow);
@@ -379,7 +402,7 @@ export class DocumentStore {
     return parseRow(this.db.prepare(`SELECT * FROM documents WHERE id = ?`).get(id) as RawDocRow);
   }
 
-  /** Physical delete (irreversible). Reserved for "truly remove this" (§4). */
+  /** Physical delete (irreversible). Reserved for "truly remove this" (§4). Its doc_dates cascade. */
   hardDelete(principal: Principal, id: number): { id: number } {
     this.getForMutation(principal, id);
     const tx = this.db.transaction(() => {
@@ -419,6 +442,112 @@ export class DocumentStore {
         days_left: daysLeft,
       };
     });
+  }
+
+  /**
+   * Dates falling in `from..to` (inclusive), oldest first, within readable
+   * scopes. Rejected dates and dates of deleted/superseded documents are left
+   * out; pending ones are included so the caller can flag them as unconfirmed.
+   */
+  upcoming(principal: Principal, params: UpcomingParams = {}): { from: string; to: string; items: UpcomingDate[] } {
+    const from = params.from ?? todayLocal();
+    if (!isValidYmd(from)) throw new ValidationError("from must be a real 'YYYY-MM-DD' date");
+    const to = params.to ?? addDays(from, UPCOMING_DEFAULT_DAYS);
+    if (!isValidYmd(to)) throw new ValidationError("to must be a real 'YYYY-MM-DD' date");
+    if (to < from) throw new ValidationError("to must not be before from");
+
+    const scopes = resolveReadScopes(principal, params.scopes);
+    const items = this.db
+      .prepare(
+        `SELECT dd.date, dd.kind, dd.title, dd.review_status, dd.doc_id, d.scope
+         FROM doc_dates dd
+         JOIN documents d ON d.id = dd.doc_id
+         WHERE dd.date >= ? AND dd.date <= ? AND dd.review_status <> 'rejected'
+           AND d.deleted = 0 AND d.scope IN (${scopes.map(() => "?").join(",")})
+         ORDER BY dd.date, dd.doc_id, dd.id`,
+      )
+      .all(from, to, ...scopes) as UpcomingDate[];
+    return { from, to, items };
+  }
+
+  /**
+   * Dates awaiting review, grouped by document. `limit` caps documents, never a
+   * document's items: a reviewer approving "all" must have seen all of them.
+   * Documents with the nearest upcoming pending date come first.
+   */
+  listPendingDates(principal: Principal, params: PendingParams = {}): PendingResult {
+    const scopes = resolveReadScopes(principal, params.scopes);
+    const limit = clamp(params.limit ?? 20, 1, 100);
+    const docFilter = params.doc_id === undefined ? "" : "AND dd.doc_id = ?";
+    const docParams = params.doc_id === undefined ? [] : [params.doc_id];
+
+    const groups = this.db
+      .prepare(
+        `SELECT dd.doc_id, MIN(CASE WHEN dd.date >= ? THEN dd.date END) AS next_date
+         FROM doc_dates dd
+         JOIN documents d ON d.id = dd.doc_id
+         WHERE dd.review_status = 'pending' AND d.deleted = 0
+           AND d.scope IN (${scopes.map(() => "?").join(",")}) ${docFilter}
+         GROUP BY dd.doc_id
+         ORDER BY next_date IS NULL, next_date, dd.doc_id`,
+      )
+      .all(todayLocal(), ...scopes, ...docParams) as { doc_id: number }[];
+
+    const documents = groups.slice(0, limit).map(({ doc_id }): PendingDocument => {
+      const doc = parseRow(this.db.prepare(`SELECT * FROM documents WHERE id = ?`).get(doc_id) as RawDocRow);
+      const items = this.db
+        .prepare(
+          `SELECT id, date, kind, title FROM doc_dates
+           WHERE doc_id = ? AND review_status = 'pending'
+           ORDER BY date, id`,
+        )
+        .all(doc_id) as { id: number; date: string; kind: DateKind; title: string }[];
+      const snippet = toSnippet(doc.full_text);
+      const title =
+        documentTitle(doc) ??
+        (snippet.length > TITLE_SNIPPET_LEN ? snippet.slice(0, TITLE_SNIPPET_LEN) + "…" : snippet);
+      return { doc_id, title, doc_type: doc.doc_type, scope: doc.scope, items };
+    });
+    return { documents, total_documents: groups.length };
+  }
+
+  /**
+   * Record a human's review of one document's dates: reject `reject_ids`, and
+   * with `approve_all` approve everything still pending. Either may be used
+   * alone, so dates can be rejected one at a time and the rest confirmed later.
+   * Requires the same permission as any other write to the document.
+   */
+  reviewDates(principal: Principal, docId: number, input: ReviewInput): ReviewResult {
+    this.getForMutation(principal, docId); // scope + write check
+    const rejectIds = [...new Set(input.reject_ids ?? [])];
+    if (!input.approve_all && rejectIds.length === 0) {
+      throw new ValidationError("nothing to review: pass approve_all=true and/or reject_ids");
+    }
+
+    const tx = this.db.transaction((): ReviewResult => {
+      const rows = this.db
+        .prepare(`SELECT id, review_status FROM doc_dates WHERE doc_id = ? ORDER BY id`)
+        .all(docId) as { id: number; review_status: ReviewStatus }[];
+      const statusById = new Map(rows.map((r) => [r.id, r.review_status]));
+      const unknown = rejectIds.filter((id) => !statusById.has(id));
+      if (unknown.length > 0) {
+        throw new ValidationError(`reject_ids not found on document ${docId}: ${unknown.join(", ")}`);
+      }
+
+      const mark = this.db.prepare(
+        `UPDATE doc_dates SET review_status = ?, reviewed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+      );
+      const rejected = rejectIds.filter((id) => statusById.get(id) !== "rejected");
+      for (const id of rejected) mark.run("rejected", id);
+
+      const rejecting = new Set(rejectIds);
+      const stillPending = rows.filter((r) => r.review_status === "pending" && !rejecting.has(r.id)).map((r) => r.id);
+      const approved = input.approve_all ? stillPending : [];
+      for (const id of approved) mark.run("approved", id);
+
+      return { doc_id: docId, approved, rejected, pending: stillPending.length - approved.length };
+    });
+    return tx();
   }
 
   /** Search with scope enforcement and the default lifecycle filter. */

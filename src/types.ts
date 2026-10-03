@@ -125,6 +125,99 @@ export interface UpcomingExpiry {
   days_left: number;
 }
 
+/**
+ * Kind of a date found in a document: `event` (行事・予定), `deadline`
+ * (締切・提出), `expiry` (満了・有効期限).
+ */
+export const DATE_KINDS = ["event", "deadline", "expiry"] as const;
+export type DateKind = (typeof DATE_KINDS)[number];
+
+/**
+ * Review state of a `doc_dates` row. Dates are extracted as candidates
+ * (`pending`) and confirmed (`approved`) or dismissed (`rejected`) by a human.
+ */
+export const REVIEW_STATUSES = ["pending", "approved", "rejected"] as const;
+export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
+
+/** Where a `doc_dates` row came from: `extracted.dates` or the document's `valid_until`. */
+export type DateSource = "extracted" | "valid_until";
+
+/** One entry of `extracted.dates`, as written by the extraction prompt. */
+export interface ExtractedDate {
+  /** `YYYY-MM-DD`. */
+  date: string;
+  kind: DateKind;
+  /** Subject line, shown as-is in notifications. */
+  title: string;
+}
+
+export interface UpcomingParams {
+  /** First day (inclusive), `YYYY-MM-DD`. Default: today. */
+  from?: string;
+  /** Last day (inclusive), `YYYY-MM-DD`. Default: 10 days after `from`. */
+  to?: string;
+  /** Requested scope filter. Intersected with the token's allowed scopes. */
+  scopes?: Scope[];
+}
+
+/** A row of the `upcoming` digest. Deliberately excludes `extracted`. */
+export interface UpcomingDate {
+  date: string;
+  kind: DateKind;
+  title: string;
+  review_status: ReviewStatus;
+  doc_id: number;
+  scope: Scope;
+}
+
+export interface PendingParams {
+  scopes?: Scope[];
+  /** Max number of documents (not items) to return. */
+  limit?: number;
+  /** Restrict to a single document. */
+  doc_id?: number;
+}
+
+export interface PendingDate {
+  /** `doc_dates.id` — pass to `review_dates.reject_ids`. */
+  id: number;
+  date: string;
+  kind: DateKind;
+  title: string;
+}
+
+/** A document with dates awaiting review, with all of its pending items. */
+export interface PendingDocument {
+  doc_id: number;
+  title: string;
+  doc_type: string | null;
+  scope: Scope;
+  items: PendingDate[];
+}
+
+export interface PendingResult {
+  documents: PendingDocument[];
+  /** Number of documents with pending dates before `limit` was applied. */
+  total_documents: number;
+}
+
+export interface ReviewInput {
+  /** Approve every still-pending date of the document (after rejections). */
+  approve_all?: boolean;
+  /** `doc_dates.id`s to reject. Must belong to the document. */
+  reject_ids?: number[];
+}
+
+export interface ReviewResult {
+  doc_id: number;
+  /** Ids approved by this call. */
+  approved: number[];
+  /** Ids rejected by this call. */
+  rejected: number[];
+  /** Dates of the document still pending afterwards. */
+  pending: number;
+}
+
 export type SearchMode = "keyword" | "vector" | "hybrid";
 
 export interface SearchParams {
