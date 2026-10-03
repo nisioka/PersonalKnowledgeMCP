@@ -123,6 +123,7 @@ interface RawDocRow {
   created_at: string;
 }
 
+/** Convert a raw `documents` row (JSON as text, flags as integers) to a DocumentRow. */
 function parseRow(raw: RawDocRow): DocumentRow {
   return {
     id: raw.id,
@@ -140,6 +141,7 @@ function parseRow(raw: RawDocRow): DocumentRow {
   };
 }
 
+/** Shape a matched row as a search hit: a snippet instead of the full text. */
 function toHit(raw: RawDocRow, score: number): SearchHit {
   const doc = parseRow(raw);
   return {

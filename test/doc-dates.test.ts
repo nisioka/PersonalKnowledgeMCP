@@ -13,6 +13,7 @@ const family: Principal = { name: "family", scopes: ["shared"], defaultWriteScop
 
 const DIM = 256;
 
+/** Local `YYYY-MM-DD` for `days` from today. */
 function dayOffset(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() + days);
@@ -79,8 +80,10 @@ describe("doc_dates sync and review", () => {
   });
   afterEach(() => db.close());
 
+  /** A document's doc_dates rows, in date order. */
   const rowsOf = (docId: number) =>
     db.prepare(`SELECT * FROM doc_dates WHERE doc_id = ? ORDER BY date, id`).all(docId) as DateRow[];
+  /** Total number of doc_dates rows. */
   const countAll = () => (db.prepare(`SELECT COUNT(*) AS c FROM doc_dates`).get() as { c: number }).c;
 
   /** A fictional school letter with two dated items. */

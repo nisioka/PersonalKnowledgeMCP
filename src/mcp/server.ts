@@ -42,10 +42,12 @@ function requireVocabularyAdmin(principal: Principal): void {
   }
 }
 
+/** Wrap a payload as a tool result carrying pretty-printed JSON text. */
 function jsonContent(payload: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }] };
 }
 
+/** Turn a thrown error into a tool error result without leaking internals. */
 function errorContent(error: unknown) {
   const known =
     error instanceof AuthError ||
@@ -74,6 +76,7 @@ function summarize(doc: DocumentRow) {
   };
 }
 
+/** Build an MCP server whose tools act as `ctx.principal` (one per request). */
 export function buildServer(ctx: ToolContext): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: VERSION },

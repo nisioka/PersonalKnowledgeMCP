@@ -200,6 +200,7 @@ describe("MCP server over HTTP", () => {
 
   it("reviews a document's dates: list_pending → review_dates → upcoming", async () => {
     const client = await connect("full-token");
+    /** Call a tool and parse its JSON text result. */
     const call = async (name: string, args: Record<string, unknown>) =>
       JSON.parse(textOf(await client.callTool({ name, arguments: args })));
 

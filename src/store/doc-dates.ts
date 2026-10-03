@@ -26,6 +26,7 @@ export function isValidYmd(value: string): boolean {
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
 
+/** Type guard for the closed set of date kinds. */
 function isDateKind(value: unknown): value is DateKind {
   return typeof value === "string" && (DATE_KINDS as readonly string[]).includes(value);
 }
