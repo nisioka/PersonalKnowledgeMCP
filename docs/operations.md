@@ -629,7 +629,9 @@ SQLCipher で DB 全体（FTS5 インデックス・WAL を含む）を暗号化
 - **トークンの追加・失効**：`.env` の `PK_TOKENS` を編集 → `sudo systemctl restart personalknowledge-mcp`。漏れたトークンは値を差し替えれば即無効。
 - **データの所在**：`~/.local/share/personal-knowledge/`（SQLite 本体）。リポジトリの外に置くので、
   ツリーを `git clean` しても消えません。バックアップ対象は SQLite のみ。
-- **破壊的操作の安全装置**：`update`/`delete` は `confirm:true` を付けるまで実行されず要約のみ返る（誤操作防止）。
+- **破壊的操作の安全装置**：`update`/`delete` は `confirm:true` を付けるまで実行されず要約のみ返る（誤操作防止）。要約には対象の文書の全文が入る。
+- **本文を書き換えるとき**：`update` を `confirm` 無しで呼ぶと、今の全文（`current.full_text`）が返る。それを直したものを `full_text` に入れ、`confirm:true` を付けて送り直す。`search` の結果にも全文が入るので、探したその場で読める。
+- **広く一覧するとき**：`search` に `snippet_only: true` を渡すと全文を省き、1行の抜粋だけを返す。件数を多く取るとき、id を探すだけのときに使う。
 - **古い情報**：`valid_until`（期限）で自動的に通常検索から外れる。履歴を見たいときは検索で `include_expired` を指定。
 
 ---

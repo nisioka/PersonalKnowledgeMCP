@@ -113,6 +113,44 @@ describe("DocumentStore", () => {
     expect(familyHits.some((h) => h.scope === "private")).toBe(false);
   });
 
+  it("returns the full text of a hit, beyond what the snippet keeps", async () => {
+    // Longer than the snippet and multi-line, with a marker only the full text reaches.
+    const body = `長い手順書 fulltextkey\n\n${"あ".repeat(700)}\n末尾の行 tailmarker`;
+    await store.register(full, { full_text: body });
+
+    const [hit] = await store.search(full, { query: "fulltextkey" });
+    expect(hit!.full_text).toBe(body);
+    expect(hit!.snippet).not.toContain("tailmarker");
+    expect(hit!.snippet.endsWith("…")).toBe(true);
+  });
+
+  it("leaves the full text out when snippet_only is set, in every mode", async () => {
+    await store.register(full, { full_text: "一覧用のメモ snippetonlykey" });
+
+    for (const mode of ["keyword", "vector", "hybrid"] as const) {
+      const [withText] = await store.search(full, { query: "snippetonlykey", mode });
+      expect(withText!.full_text).toBe("一覧用のメモ snippetonlykey");
+
+      const [hit] = await store.search(full, { query: "snippetonlykey", mode, snippet_only: true });
+      expect(hit).not.toHaveProperty("full_text");
+      expect(hit!.snippet).toContain("snippetonlykey");
+    }
+  });
+
+  it("does not hand the full text of an unreadable scope to a limited token", async () => {
+    await store.register(full, { full_text: "秘密の全文 leakkey privatebody", scope: "private" });
+    await store.register(full, { full_text: "共有の全文 leakkey sharedbody", scope: "shared" });
+
+    for (const mode of ["keyword", "vector", "hybrid"] as const) {
+      // The full token reaches both, so an empty result below is not a query that matches nothing.
+      const fullTexts = (await store.search(full, { query: "leakkey", mode })).map((h) => h.full_text);
+      expect(fullTexts.some((t) => t?.includes("privatebody"))).toBe(true);
+
+      const familyTexts = (await store.search(family, { query: "leakkey", mode })).map((h) => h.full_text);
+      expect(familyTexts).toEqual(["共有の全文 leakkey sharedbody"]);
+    }
+  });
+
   it("includes shared results for a work token", async () => {
     await store.register(full, { full_text: "業務メモ workmarker", scope: "work" });
     await store.register(full, { full_text: "共有メモ sharedmarker2", scope: "shared" });
