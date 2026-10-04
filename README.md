@@ -75,9 +75,9 @@ pnpm run build && pnpm start
 | ツール | 用途 | 備考 |
 |---|---|---|
 | `register` | 知識の登録 | `lifecycle=singleton` かつ `dedup_key` で旧版を supersede（`history` は対象外）。`doc_type` は null か既知語彙のみ（§9.5 v2） |
-| `search` | 検索 | `keyword`（既定、trigram FTS — 日英の部分一致・3文字以上）、`vector`、`hybrid`／履歴照会は `include_expired` |
-| `update` | フィールド上書き | **破壊的**：`confirm: true` がなければプレビューのみ（§9.4）。`lifecycle` も変更可 |
-| `delete` | アーカイブ／削除 | `mode: soft`（既定・可逆）/ `hard`／`confirm: true` まではプレビュー |
+| `search` | 検索 | `keyword`（既定、trigram FTS — 日英の部分一致・3文字以上）、`vector`、`hybrid`／履歴照会は `include_expired`。結果には本文の全文（`full_text`）と1行の抜粋（`snippet`）が入る。広く一覧するときは `snippet_only: true` で全文を省ける |
+| `update` | フィールド上書き | **破壊的**：`confirm: true` がなければプレビューのみ（§9.4）。`lifecycle` も変更可。プレビューにも適用後の応答にも本文の全文が入るので、`confirm` 無しで呼べば書き換える前の全文が取れる |
+| `delete` | アーカイブ／削除 | `mode: soft`（既定・可逆）/ `hard`／`confirm: true` まではプレビュー。プレビューには消す文書の全文が入る |
 | `restore` | アーカイブ解除 | soft delete を取り消す |
 | `list_doc_types` | 語彙一覧 | doc_type 語彙は空スタート。表記ゆれを抑える（§9.5 v2） |
 | `upsert_doc_type` | 語彙の作成・編集 | doc_type を追加／更新。full トークン限定 |
@@ -184,6 +184,7 @@ Access が `Cf-Access-Authenticated-User-Email` ヘッダを付与するので�
 - サーバは **クライアント指定の scope を一切信用しません**。トークンの許可集合と突き合わせ、
   許可外への書き込みは拒否します。
 - `shared` の知識は、それを許可するすべてのトークンから参照できます。
+- 本文の全文を返すのは、そのトークンが読める scope の文書だけです。抜粋も全文も同じ scope の判定を通ります。
 - `update` と `delete` には明示的な `confirm: true` が必要です（無しならプレビューを返すだけで変更しません）。`restore`（soft delete の解除）は復元方向のため確認不要です（§9.4）。
 - 認証済みリクエストはすべて監査ログに記録されます（`src/audit.ts`）。ログ出力は
   `src/redact.ts` を単一チョークポイントとして**マスキング**され、マイナンバー（12桁／4-4-4 区切り）・
