@@ -65,9 +65,12 @@ describe("MCP server over HTTP", () => {
       "delete",
       "delete_doc_type",
       "list_doc_types",
+      "list_pending",
       "register",
       "restore",
+      "review_dates",
       "search",
+      "upcoming",
       "update",
       "upsert_doc_type",
     ]);
@@ -195,6 +198,89 @@ describe("MCP server over HTTP", () => {
     await client.close();
   });
 
+  it("reviews a document's dates: list_pending → review_dates → upcoming", async () => {
+    const client = await connect("full-token");
+    /** Call a tool and parse its JSON text result. */
+    const call = async (name: string, args: Record<string, unknown>) =>
+      JSON.parse(textOf(await client.callTool({ name, arguments: args })));
+
+    const reg = await call("register", {
+      full_text: "遠足のお知らせ 持ち物はお弁当と水筒です datesflow",
+      scope: "shared",
+      extracted: {
+        title: "遠足のお知らせ",
+        dates: [
+          { date: "2031-05-10", kind: "event", title: "遠足" },
+          { date: "2031-05-02", kind: "deadline", title: "参加申込の締切" },
+          { date: "2031-05-06", kind: "event", title: "読み取り違いの予定" },
+        ],
+      },
+    });
+    const docId = reg.id as number;
+
+    // Right after register, the caller gets this document's candidates with row ids.
+    const pending = await call("list_pending", { doc_id: docId });
+    expect(pending.documents).toHaveLength(1);
+    expect(pending.documents[0].title).toBe("遠足のお知らせ");
+    const items = pending.documents[0].items as { id: number; date: string; title: string }[];
+    expect(items.map((i) => i.title)).toEqual(["参加申込の締切", "読み取り違いの予定", "遠足"]);
+
+    // Reject one row on its own, then approve the rest.
+    const wrong = items[1]!.id;
+    const rejected = await call("review_dates", { doc_id: docId, reject_ids: [wrong] });
+    expect(rejected).toMatchObject({ ok: true, rejected: [wrong], approved: [], pending: 2 });
+    const approved = await call("review_dates", { doc_id: docId, approve_all: true });
+    expect(approved).toMatchObject({ ok: true, rejected: [], pending: 0 });
+    expect(approved.approved).toHaveLength(2);
+    expect((await call("list_pending", { doc_id: docId })).documents).toEqual([]);
+
+    // The digest carries the bare fields only — no extracted metadata, no text.
+    const upcoming = await call("upcoming", { from: "2031-05-01", to: "2031-05-31", scopes: ["shared"] });
+    const mine = (upcoming.items as { doc_id: number }[]).filter((i) => i.doc_id === docId);
+    expect(mine).toEqual([
+      { date: "2031-05-02", kind: "deadline", title: "参加申込の締切", review_status: "approved", doc_id: docId, scope: "shared" },
+      { date: "2031-05-10", kind: "event", title: "遠足", review_status: "approved", doc_id: docId, scope: "shared" },
+    ]);
+    await client.close();
+  });
+
+  it("register rejects malformed extracted.dates with a fixable message", async () => {
+    const client = await connect("full-token");
+    const reg = await client.callTool({
+      name: "register",
+      arguments: { full_text: "x", scope: "shared", extracted: { dates: [{ date: "5月10日", kind: "event", title: "遠足" }] } },
+    });
+    expect(reg.isError).toBe(true);
+    expect(textOf(reg)).toMatch(/extracted\.dates\[0\]\.date/);
+    await client.close();
+  });
+
+  it("review_dates follows write permission: family cannot review a private document", async () => {
+    const admin = await connect("full-token");
+    const reg = JSON.parse(
+      textOf(
+        await admin.callTool({
+          name: "register",
+          arguments: {
+            full_text: "プライベートな予定 privatedates",
+            scope: "private",
+            extracted: { dates: [{ date: "2031-07-01", kind: "event", title: "個人の予定" }] },
+          },
+        }),
+      ),
+    );
+    await admin.close();
+
+    const familyClient = await connect("family-token");
+    const res = await familyClient.callTool({ name: "review_dates", arguments: { doc_id: reg.id, approve_all: true } });
+    expect(res.isError).toBe(true);
+    const upcoming = JSON.parse(
+      textOf(await familyClient.callTool({ name: "upcoming", arguments: { from: "2031-07-01", to: "2031-07-01" } })),
+    );
+    expect(upcoming.items).toEqual([]);
+    await familyClient.close();
+  });
+
   it("exposes the ingest_document prompt (guidance, empty vocabulary)", async () => {
     const client = await connect("full-token");
     const { prompts } = await client.listPrompts();
@@ -204,6 +290,9 @@ describe("MCP server over HTTP", () => {
     const text = got.messages.map((m) => (m.content as { type: string; text: string }).text).join("\n");
     expect(text).toContain("register");
     expect(text).toContain("lifecycle");
+    // Dates are always extracted into the common key, with notification-safe titles.
+    expect(text).toContain("extracted.dates");
+    expect(text).toContain("金額は件名に入れない");
     await client.close();
   });
 });

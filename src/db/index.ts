@@ -1,6 +1,6 @@
 /**
- * SQLite setup: the `documents` table, an FTS5 index for keyword search, and a
- * sqlite-vec virtual table for vector search.
+ * SQLite setup: the `documents` table (plus `doc_types` and `doc_dates`), an
+ * FTS5 index for keyword search, and a sqlite-vec virtual table for vector search.
  *
  * Design §4: `valid_until` and `deleted` are promoted to real, indexed columns
  * (not buried in the `extracted` JSON) because every search filters on them.
@@ -9,6 +9,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database, { type Database as DB } from "better-sqlite3-multiple-ciphers";
 import * as sqliteVec from "sqlite-vec";
+import { backfillDocDates } from "../store/doc-dates.js";
 import { NO_EXPIRY } from "../types.js";
 
 export type { DB };
@@ -59,6 +60,25 @@ function schemaSql(embeddingDim: number): string {
       created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
 
+    -- Dates a document mentions, one row each, so a human's review survives
+    -- re-extraction. Derived from documents.extracted.dates and valid_until; only
+    -- review_status/reviewed_at are owned here (carried over by item_key).
+    CREATE TABLE IF NOT EXISTS doc_dates (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_id        INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      date          TEXT    NOT NULL,                       -- 'YYYY-MM-DD'
+      kind          TEXT    NOT NULL CHECK (kind IN ('event','deadline','expiry')),
+      title         TEXT    NOT NULL,                       -- shown as-is in notifications
+      source        TEXT    NOT NULL CHECK (source IN ('extracted','valid_until')),
+      item_key      TEXT    NOT NULL,                       -- date + normalized title; matches re-extractions
+      review_status TEXT    NOT NULL DEFAULT 'pending'
+                      CHECK (review_status IN ('pending','approved','rejected')),
+      reviewed_at   TEXT,                                   -- when it was approved/rejected
+      UNIQUE (doc_id, source, item_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_doc_dates_date ON doc_dates(date);
+    CREATE INDEX IF NOT EXISTS idx_doc_dates_review ON doc_dates(review_status, doc_id);
+
     -- The default search filter is (scope IN ...) AND deleted=0 AND valid_until>=today.
     CREATE INDEX IF NOT EXISTS idx_documents_filter ON documents(scope, deleted, valid_until);
     CREATE INDEX IF NOT EXISTS idx_documents_doc_type ON documents(doc_type);
@@ -83,21 +103,27 @@ function schemaSql(embeddingDim: number): string {
 }
 
 /**
- * Baseline schema version. `schemaSql()` is the current baseline, so a fresh DB
- * is already at this version. This scaffold exists so future schema changes can
- * be applied incrementally: bump SCHEMA_VERSION and add a `from < N` step in
- * migrate(). There is intentionally no legacy backfill here — the project is
- * early enough that any pre-existing DB is discarded and recreated fresh.
+ * Schema version. `schemaSql()` always describes the current schema, so a fresh
+ * DB is created at this version; migrate() brings an older DB's *data* up to it.
+ * To change the schema: bump SCHEMA_VERSION and add a `from < N` step in
+ * migrate(). There is intentionally no legacy backfill for version 1 — any DB
+ * older than that is discarded and recreated fresh.
+ *
+ *   1: baseline (documents.lifecycle + doc_types, §9.5)
+ *   2: doc_dates
  */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
-/** Stamp/upgrade the DB's user_version. Future migration steps go here. */
+/** Stamp/upgrade the DB's user_version, running the steps it has not seen. */
 function migrate(db: DB): void {
   const from = (db.pragma("user_version", { simple: true }) as number) ?? 0;
   if (from >= SCHEMA_VERSION) return;
-  // (No steps yet — SCHEMA_VERSION 1 is the baseline created by schemaSql().)
-  // Future: `if (from < 2) { ...alter/backfill... }` before stamping.
-  db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  db.transaction(() => {
+    // 2: documents stored before doc_dates existed get their rows now (a no-op
+    // on a fresh DB). Tables themselves come from schemaSql().
+    if (from < 2) backfillDocDates(db);
+    db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  })();
 }
 
 export interface OpenDbOptions {

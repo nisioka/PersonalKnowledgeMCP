@@ -1,5 +1,6 @@
 /**
- * MCP server wiring: register / search / update / delete / restore / list_doc_types.
+ * MCP server wiring: register / search / update / delete / restore, the doc_type
+ * vocabulary tools, and the date tools (upcoming / list_pending / review_dates).
  *
  * A server is built per request with the authenticated principal captured in
  * closure, so scope enforcement (via the store + guard) always uses the real
@@ -27,6 +28,7 @@ export interface ToolContext {
 
 const scopeEnum = z.enum(SCOPES);
 const lifecycleEnum = z.enum(LIFECYCLES);
+const ymd = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 /**
  * Mutating the shared doc_type vocabulary is a curator action, restricted to a
@@ -40,10 +42,12 @@ function requireVocabularyAdmin(principal: Principal): void {
   }
 }
 
+/** Wrap a payload as a tool result carrying pretty-printed JSON text. */
 function jsonContent(payload: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }] };
 }
 
+/** Turn a thrown error into a tool error result without leaking internals. */
 function errorContent(error: unknown) {
   const known =
     error instanceof AuthError ||
@@ -72,6 +76,7 @@ function summarize(doc: DocumentRow) {
   };
 }
 
+/** Build an MCP server whose tools act as `ctx.principal` (one per request). */
 export function buildServer(ctx: ToolContext): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: VERSION },
@@ -99,7 +104,13 @@ export function buildServer(ctx: ToolContext): McpServer {
         lifecycle: lifecycleEnum
           .optional()
           .describe("'singleton' (latest wins, supersedes) or 'history' (keep every version). Default from the doc_type, else 'singleton'."),
-        extracted: z.record(z.unknown()).optional().describe("Extracted metadata as a JSON object."),
+        extracted: z
+          .record(z.unknown())
+          .optional()
+          .describe(
+            "Extracted metadata as a JSON object. extracted.dates = [{date:'YYYY-MM-DD', kind:'event'|'deadline'|'expiry', title}] " +
+              "lists the dates the document mentions; each becomes a pending entry for upcoming / list_pending.",
+          ),
         scope: scopeEnum.optional().describe("Target scope. Defaults to your token's default write scope."),
         valid_until: z
           .string()
@@ -338,6 +349,86 @@ export function buildServer(ctx: ToolContext): McpServer {
     },
   );
 
+  server.registerTool(
+    "upcoming",
+    {
+      title: "Upcoming dates",
+      description:
+        "List the dates (events, deadlines, expiries) that stored documents mention within a period, oldest " +
+        "first. Returns only date, kind, title, review_status, doc_id and scope — not the documents. " +
+        "review_status 'pending' means nobody has confirmed the date yet. Rejected dates and dates of " +
+        "deleted or superseded documents are left out.",
+      inputSchema: {
+        from: ymd.optional().describe("First day 'YYYY-MM-DD' (inclusive). Default: today."),
+        to: ymd.optional().describe("Last day 'YYYY-MM-DD' (inclusive). Default: 10 days after from."),
+        scopes: z.array(scopeEnum).optional().describe("Restrict to these scopes (intersected with your token)."),
+      },
+    },
+    async (args) => {
+      try {
+        const { from, to, items } = ctx.store.upcoming(ctx.principal, args);
+        return jsonContent({ ok: true, from, to, count: items.length, items });
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_pending",
+    {
+      title: "List dates awaiting review",
+      description:
+        "List dates that nobody has approved or rejected yet, grouped by document with the document's title. " +
+        "Each item carries the id to pass to review_dates.reject_ids. limit caps the number of documents; " +
+        "a listed document always comes with all of its pending dates. Pass doc_id to get one document's " +
+        "pending dates (e.g. right after register/update).",
+      inputSchema: {
+        scopes: z.array(scopeEnum).optional().describe("Restrict to these scopes (intersected with your token)."),
+        limit: z.number().int().min(1).max(100).optional().describe("Max documents. Default 20."),
+        doc_id: z.number().int().optional().describe("Only this document."),
+      },
+    },
+    async (args) => {
+      try {
+        const { documents, total_documents } = ctx.store.listPendingDates(ctx.principal, args);
+        return jsonContent({ ok: true, count: documents.length, total_documents, documents });
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "review_dates",
+    {
+      title: "Approve or reject a document's dates",
+      description:
+        "Record the review of one document's dates. reject_ids rejects those dates; approve_all=true approves " +
+        "every date of the document that is still pending (after the rejections). Either can be used alone: " +
+        "reject dates one call at a time, then approve the rest. Requires write permission on the document's scope.",
+      inputSchema: {
+        doc_id: z.number().int().describe("Document whose dates are reviewed."),
+        approve_all: z.boolean().optional().describe("Approve all of the document's still-pending dates."),
+        reject_ids: z.array(z.number().int()).optional().describe("Ids (from list_pending) of dates to reject."),
+      },
+    },
+    async (args) => {
+      try {
+        const { doc_id, ...input } = args;
+        const result = ctx.store.reviewDates(ctx.principal, doc_id, input);
+        audit("dates.review", ctx.principal.name, {
+          doc_id,
+          approved: result.approved.length,
+          rejected: result.rejected.length,
+        });
+        return jsonContent({ ok: true, ...result });
+      } catch (error) {
+        return errorContent(error);
+      }
+    },
+  );
+
   // Prompt that guides Claude to do OCR + structure extraction ITSELF (using the
   // client's own multimodal ability) and then call `register`. This removes the
   // need for a server-side Anthropic API key / Python OCR: attach a document in
@@ -375,7 +466,15 @@ export function buildServer(ctx: ToolContext): McpServer {
         "  同じ種類を今後も繰り返し登録すると分かっている場合に限り、先に upsert_doc_type で綺麗な意味名の型を作ってから使う（勝手に増やしすぎない）。",
         "- lifecycle: 『最新だけ残す』情報は \"singleton\"、『毎回が記録として残る』情報（各年の税額・支出・日記など）は \"history\"。",
         "  既知の doc_type を使う場合は省略すればその既定値が入る。判断できなければ singleton。",
-        "- extracted: 読み取れた項目の JSON。日付は YYYY-MM-DD。発行日/イベント日は issued_date / event_date に入れる（登録日とは別物）。",
+        "- extracted: 読み取れた項目の JSON。日付は YYYY-MM-DD。発行日は issued_date に入れる（登録日とは別物）。",
+        "- extracted.title: 書類名（例 \"運動会のお知らせ\"）。確認待ちの一覧や通知に載るので、番号類・金額は入れない。",
+        "- extracted.dates: 必ず出す。書類に書かれた予定・期限を 1 件 1 要素で並べた配列 [{date, kind, title}]。1 件も無ければ空配列 []。",
+        "  - date: YYYY-MM-DD。年が書かれていなければ発行日や文脈から補う。期間のある予定は開始日。",
+        "  - kind: \"event\"（行事・予定）／\"deadline\"（締切・提出・支払期日）／\"expiry\"（満了・有効期限）。",
+        "  - title: 通知にそのまま載る件名（例 \"運動会\"、\"参加申込の締切\"）。これだけ読んで何の日か分かるように書く。",
+        "    電話番号・契約番号・口座番号などの番号類と、金額は件名に入れない。",
+        "  - valid_until に入れた満了日は自動で expiry として登録されるので、同じ満了を dates に重ねて書かない。",
+        "  - 登録した日付は「確認待ち」で入る。承認・却下は人が決めるので、頼まれるまで review_dates を呼ばない。",
         "- valid_until: 有効期限 YYYY-MM-DD。無期限なら \"9999-12-31\"。lifecycle とは別概念（恒久情報は singleton ＋ 9999-12-31）。",
         "- dedup_key: singleton で『最新だけ残す』情報には論理キー（例 \"保育園:電話番号\"）。history では null。",
         "- scope: 明確に共有/仕事のものでなければ private。",
