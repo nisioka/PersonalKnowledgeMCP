@@ -229,6 +229,8 @@ export interface SearchParams {
   /** Drop the `valid_until >= today` filter for history lookups. */
   include_expired?: boolean;
   limit?: number;
+  /** Leave `full_text` out of the hits, for broad listings where the excerpt is enough. */
+  snippet_only?: boolean;
 }
 
 export interface SearchHit {
@@ -243,5 +245,7 @@ export interface SearchHit {
   score: number;
   /** Excerpt of `full_text`. */
   snippet: string;
+  /** The whole text. Absent when the search asked for `snippet_only`. */
+  full_text?: string;
   extracted: Record<string, unknown>;
 }

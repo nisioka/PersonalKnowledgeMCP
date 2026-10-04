@@ -126,6 +126,99 @@ describe("MCP server over HTTP", () => {
     await familyClient.close();
   });
 
+  it("search returns the full text, and leaves it out with snippet_only", async () => {
+    const client = await connect("full-token");
+    const body = `引っ越しの手順 e2efulltext\n\n${"あ".repeat(700)}\n最後の行 e2etail`;
+    await client.callTool({ name: "register", arguments: { full_text: body, scope: "shared" } });
+
+    const hit = JSON.parse(textOf(await client.callTool({ name: "search", arguments: { query: "e2efulltext" } })))
+      .results[0];
+    expect(hit.full_text).toBe(body);
+    expect(hit.snippet).not.toContain("e2etail");
+
+    const listed = JSON.parse(
+      textOf(await client.callTool({ name: "search", arguments: { query: "e2efulltext", snippet_only: true } })),
+    ).results[0];
+    expect(listed).not.toHaveProperty("full_text");
+    expect(listed.snippet).toContain("e2efulltext");
+    await client.close();
+  });
+
+  it("update without confirm returns the full text to rewrite, and the applied result the new one", async () => {
+    const client = await connect("full-token");
+    const body = `書き換える前の本文 previewdoc\n\n${"い".repeat(300)}\n前の末尾 previewtail`;
+    const id = JSON.parse(
+      textOf(await client.callTool({ name: "register", arguments: { full_text: body, scope: "shared" } })),
+    ).id as number;
+
+    // No patch at all: the preview is a plain read of the document.
+    const preview = JSON.parse(textOf(await client.callTool({ name: "update", arguments: { id } })));
+    expect(preview.requires_confirmation).toBe(true);
+    expect(preview.current.full_text).toBe(body);
+
+    const next = body.replace("前の末尾 previewtail", "後の末尾 appliedtail");
+    const applied = JSON.parse(
+      textOf(await client.callTool({ name: "update", arguments: { id, confirm: true, full_text: next } })),
+    );
+    expect(applied.updated.full_text).toBe(next);
+    await client.close();
+  });
+
+  it("delete and restore carry the full text of the document they act on", async () => {
+    const client = await connect("full-token");
+    const body = `消して戻す本文 archivedoc\n\n${"う".repeat(300)}\n末尾 archivetail`;
+    const id = JSON.parse(
+      textOf(await client.callTool({ name: "register", arguments: { full_text: body, scope: "shared" } })),
+    ).id as number;
+
+    const preview = JSON.parse(textOf(await client.callTool({ name: "delete", arguments: { id } })));
+    expect(preview.current.full_text).toBe(body);
+    const archived = JSON.parse(textOf(await client.callTool({ name: "delete", arguments: { id, confirm: true } })));
+    expect(archived.archived.full_text).toBe(body);
+    const restored = JSON.parse(textOf(await client.callTool({ name: "restore", arguments: { id } })));
+    expect(restored.restored.full_text).toBe(body);
+    await client.close();
+  });
+
+  it("enforces read scope on the full text: family gets none of a private doc through any tool", async () => {
+    const admin = await connect("full-token");
+    const id = JSON.parse(
+      textOf(
+        await admin.callTool({
+          name: "register",
+          arguments: { full_text: "プライベートな全文 fulltextleak privateonlybody", scope: "private" },
+        }),
+      ),
+    ).id as number;
+    // The full token reads it back through the same calls, so the checks below are not vacuous.
+    expect(textOf(await admin.callTool({ name: "search", arguments: { query: "fulltextleak" } }))).toContain(
+      "privateonlybody",
+    );
+    expect(textOf(await admin.callTool({ name: "update", arguments: { id } }))).toContain("privateonlybody");
+    await admin.close();
+
+    const familyClient = await connect("family-token");
+    const search = await familyClient.callTool({ name: "search", arguments: { query: "fulltextleak" } });
+    expect(JSON.parse(textOf(search)).count).toBe(0);
+    expect(textOf(search)).not.toContain("privateonlybody");
+
+    for (const call of [
+      { name: "update", arguments: { id } },
+      { name: "delete", arguments: { id } },
+      { name: "restore", arguments: { id } },
+    ]) {
+      const res = await familyClient.callTool(call);
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).not.toContain("privateonlybody");
+    }
+    await familyClient.close();
+
+    // The refused restore changed nothing: the document is still there for its owner.
+    const check = await connect("full-token");
+    expect(JSON.parse(textOf(await check.callTool({ name: "search", arguments: { query: "fulltextleak" } }))).count).toBe(1);
+    await check.close();
+  });
+
   it("requires confirmation before a destructive delete", async () => {
     const client = await connect("full-token");
     const reg = await client.callTool({

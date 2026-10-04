@@ -141,7 +141,7 @@ function parseRow(raw: RawDocRow): DocumentRow {
   };
 }
 
-/** Shape a matched row as a search hit: a snippet instead of the full text. */
+/** Shape a matched row as a search hit: the full text plus a one-line snippet of it. */
 function toHit(raw: RawDocRow, score: number): SearchHit {
   const doc = parseRow(raw);
   return {
@@ -154,6 +154,7 @@ function toHit(raw: RawDocRow, score: number): SearchHit {
     created_at: doc.created_at,
     score,
     snippet: toSnippet(doc.full_text),
+    full_text: doc.full_text,
     extracted: doc.extracted,
   };
 }
@@ -552,7 +553,10 @@ export class DocumentStore {
     return tx();
   }
 
-  /** Search with scope enforcement and the default lifecycle filter. */
+  /**
+   * Search with scope enforcement and the default lifecycle filter. Hits carry
+   * the full text unless `snippet_only` is set.
+   */
   async search(principal: Principal, params: SearchParams): Promise<SearchHit[]> {
     const query = (params.query ?? "").trim();
     if (query.length === 0) throw new ValidationError("query is required");
@@ -564,9 +568,14 @@ export class DocumentStore {
 
     const filters = this.buildFilters(scopes, params.doc_type, params.include_expired, today);
 
-    if (mode === "keyword") return this.searchKeyword(query, filters, limit);
-    if (mode === "vector") return await this.searchVector(query, filters, limit);
-    return await this.searchHybrid(query, filters, limit);
+    const hits =
+      mode === "keyword"
+        ? this.searchKeyword(query, filters, limit)
+        : mode === "vector"
+          ? await this.searchVector(query, filters, limit)
+          : await this.searchHybrid(query, filters, limit);
+    // The full text is the default; a caller listing broadly can opt out of its size.
+    return params.snippet_only ? hits.map(({ full_text: _omitted, ...hit }) => hit) : hits;
   }
 
   /** Shared WHERE fragment + bound params for scope/lifecycle/doc_type. */

@@ -63,7 +63,11 @@ function errorContent(error: unknown) {
   return { isError: true as const, content: [{ type: "text" as const, text: message }] };
 }
 
-/** Compact, human-readable summary of a document for confirmation previews. */
+/**
+ * Summary of a document for confirmation previews and mutation results. Carries
+ * the full text, so an `update` preview is also how a caller reads the text it
+ * is about to rewrite.
+ */
 function summarize(doc: DocumentRow) {
   const snippet = doc.full_text.replace(/\s+/g, " ").trim().slice(0, 160);
   return {
@@ -73,6 +77,7 @@ function summarize(doc: DocumentRow) {
     valid_until: doc.valid_until,
     deleted: doc.deleted,
     snippet: snippet.length < doc.full_text.length ? snippet + "…" : snippet,
+    full_text: doc.full_text,
   };
 }
 
@@ -145,7 +150,10 @@ export function buildServer(ctx: ToolContext): McpServer {
       title: "Search knowledge",
       description:
         "Search stored household knowledge. By default only non-deleted, non-expired documents " +
-        "within scopes your token can read are returned. Use include_expired for history lookups.",
+        "within scopes your token can read are returned. Use include_expired for history lookups. " +
+        "Each result carries the document's full_text as well as a one-line snippet. When listing " +
+        "broadly (a high limit, or only to find ids), pass snippet_only=true to leave full_text out " +
+        "and keep the response small.",
       inputSchema: {
         query: z.string().min(1).describe("Free-text query (>= 3 chars for keyword matching)."),
         mode: z.enum(["keyword", "vector", "hybrid"]).optional().describe("Search mode. Default 'keyword'."),
@@ -153,6 +161,10 @@ export function buildServer(ctx: ToolContext): McpServer {
         doc_type: z.string().optional().describe("Restrict to a single doc_type."),
         include_expired: z.boolean().optional().describe("Include expired documents for history lookups."),
         limit: z.number().int().min(1).max(100).optional().describe("Max results. Default 10."),
+        snippet_only: z
+          .boolean()
+          .optional()
+          .describe("Omit full_text from the results and return only the snippet. Default false."),
       },
     },
     async (args) => {
@@ -171,7 +183,9 @@ export function buildServer(ctx: ToolContext): McpServer {
       title: "Update knowledge (destructive)",
       description:
         "Overwrite fields of an existing document. This is destructive: without confirm=true it " +
-        "returns a preview of the current record and makes NO change. Re-issue with confirm=true to apply.",
+        "returns a preview of the current record and makes NO change. Re-issue with confirm=true to apply. " +
+        "The preview and the applied result both carry the document's full_text, so calling update " +
+        "without confirm is how to read the whole text before rewriting it.",
       inputSchema: {
         id: z.number().int().describe("Document id to update."),
         confirm: z.boolean().optional().describe("Must be true to actually apply the change."),
