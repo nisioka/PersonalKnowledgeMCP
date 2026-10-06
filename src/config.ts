@@ -59,6 +59,25 @@ const DEV_TOKENS: Record<string, Principal> = {
   "family-dev-token": { name: "family", scopes: ["shared"], defaultWriteScope: "shared" },
 };
 
+/**
+ * True when `host` can only be reached from this machine. Used to gate the
+ * built-in DEV_TOKENS: they are published inside the npm package, so binding
+ * anywhere else with them is effectively unauthenticated (see index.ts).
+ *
+ * Anything unrecognised — `0.0.0.0`, `::`, a LAN address, a hostname, or the
+ * empty string that Node expands to "all interfaces" — is reported as NOT
+ * loopback, so an unparseable value fails closed.
+ */
+export function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost") return true;
+  if (h === "::1" || h === "0:0:0:0:0:0:0:1") return true;
+  // IPv4-mapped IPv6 (`::ffff:127.0.0.1`) reaches the same v4 stack.
+  const v4 = h.startsWith("::ffff:") ? h.slice("::ffff:".length) : h;
+  // The whole 127.0.0.0/8 block is loopback, not just 127.0.0.1.
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4);
+}
+
 interface RawPrincipal {
   name: string;
   scopes: string[];

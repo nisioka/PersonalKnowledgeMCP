@@ -21,3 +21,6 @@ data/
 
 # Cloudflare Tunnel: 実設定（トンネル UUID・ホスト名・認証情報のパスを含む）
 deploy/cloudflared-config.yml
+
+# npm pack output (npm publish creates this locally)
+*.tgz

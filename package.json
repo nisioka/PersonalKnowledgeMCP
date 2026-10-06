@@ -1,15 +1,45 @@
 {
   "name": "personal-knowledge-mcp",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Household knowledge base MCP server (Phase 1: LAN-only foundation)",
+  "version": "0.2.0",
+  "mcpName": "io.github.nisioka/personal-knowledge-mcp",
+  "description": "Self-hosted MCP server for a personal knowledge base: scoped search, ingestion, expiry reminders",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "claude",
+    "knowledge-base",
+    "self-hosted",
+    "sqlite",
+    "sqlite-vec",
+    "full-text-search",
+    "reminders"
+  ],
+  "license": "MIT",
+  "author": "nisioka (https://github.com/nisioka)",
+  "homepage": "https://github.com/nisioka/PersonalKnowledgeMCP#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nisioka/PersonalKnowledgeMCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nisioka/PersonalKnowledgeMCP/issues"
+  },
   "type": "module",
   "engines": {
-    "node": ">=22.13"
+    "node": ">=20"
   },
   "packageManager": "pnpm@11.8.0",
   "bin": {
     "pk-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -21,7 +51,8 @@
     "db:decrypt": "node dist/db/rekey-cli.js decrypt",
     "reminders": "node dist/reminders/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

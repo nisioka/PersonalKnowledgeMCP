@@ -1,0 +1,70 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.nisioka/personal-knowledge-mcp",
+  "title": "Personal Knowledge",
+  "description": "Self-hosted MCP server for a personal knowledge base: scoped search, ingestion, expiry reminders",
+  "version": "0.2.0",
+  "websiteUrl": "https://github.com/nisioka/PersonalKnowledgeMCP#readme",
+  "repository": {
+    "url": "https://github.com/nisioka/PersonalKnowledgeMCP",
+    "source": "github",
+    "id": "1275087739"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "personal-knowledge-mcp",
+      "version": "0.2.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://127.0.0.1:{PK_PORT}/mcp",
+        "headers": [
+          {
+            "name": "Authorization",
+            "description": "Bearer token matching a principal in PK_TOKENS. Use 'Bearer full-dev-token' only with the built-in dev tokens on loopback.",
+            "isRequired": true,
+            "isSecret": true
+          }
+        ]
+      },
+      "environmentVariables": [
+        {
+          "name": "PK_PORT",
+          "description": "TCP port the MCP server listens on.",
+          "format": "number",
+          "default": "8848"
+        },
+        {
+          "name": "PK_HOST",
+          "description": "Bind address. A non-loopback value requires PK_TOKENS: with the built-in dev tokens the server exits instead of listening.",
+          "default": "127.0.0.1"
+        },
+        {
+          "name": "PK_DB_PATH",
+          "description": "Path to the SQLite database file. Use an absolute path outside the install directory.",
+          "format": "filepath",
+          "default": "data/knowledge.db"
+        },
+        {
+          "name": "PK_TOKENS",
+          "description": "JSON map of bearer token to principal (name, scopes, defaultWriteScope). Unset falls back to built-in dev tokens, and the server then refuses to bind anywhere but loopback.",
+          "isSecret": true,
+          "placeholder": "{\"<secret>\":{\"name\":\"full\",\"scopes\":[\"private\",\"work\",\"shared\"],\"defaultWriteScope\":\"private\"}}"
+        },
+        {
+          "name": "PK_DB_PASSPHRASE",
+          "description": "Optional SQLCipher passphrase. When set, the whole database file is encrypted at rest. Losing it makes the database and its backups unrecoverable.",
+          "isSecret": true
+        },
+        {
+          "name": "PK_EMBEDDING_DIM",
+          "description": "Embedding vector dimension. Fixed when the database is created; changing it requires a fresh database.",
+          "format": "number",
+          "default": "256"
+        }
+      ]
+    }
+  ]
+}
