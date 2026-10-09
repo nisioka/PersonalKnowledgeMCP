@@ -197,12 +197,12 @@ export interface PendingDocument {
 
 export interface PendingResult {
   documents: PendingDocument[];
-  /** Number of documents with pending dates before `limit` was applied. */
+  /** Number of documents with pending dates from today on, before `limit` was applied. */
   total_documents: number;
 }
 
 export interface ReviewInput {
-  /** Approve every still-pending date of the document (after rejections). */
+  /** Approve every still-pending date of the document from today on (after rejections). */
   approve_all?: boolean;
   /** `doc_dates.id`s to reject. Must belong to the document. */
   reject_ids?: number[];
@@ -214,7 +214,7 @@ export interface ReviewResult {
   approved: number[];
   /** Ids rejected by this call. */
   rejected: number[];
-  /** Dates of the document still pending afterwards. */
+  /** Dates of the document from today on that are still pending afterwards. */
   pending: number;
 }
 

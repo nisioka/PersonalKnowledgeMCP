@@ -394,6 +394,7 @@ export function buildServer(ctx: ToolContext): McpServer {
       title: "List dates awaiting review",
       description:
         "List dates that nobody has approved or rejected yet, grouped by document with the document's title. " +
+        "Dates before today are left out. " +
         "Each item carries the id to pass to review_dates.reject_ids. limit caps the number of documents; " +
         "a listed document always comes with all of its pending dates. Pass doc_id to get one document's " +
         "pending dates (e.g. right after register/update).",
@@ -419,11 +420,12 @@ export function buildServer(ctx: ToolContext): McpServer {
       title: "Approve or reject a document's dates",
       description:
         "Record the review of one document's dates. reject_ids rejects those dates; approve_all=true approves " +
-        "every date of the document that is still pending (after the rejections). Either can be used alone: " +
+        "every date of the document that is still pending and not before today (after the rejections) — the " +
+        "same dates list_pending shows. Either can be used alone: " +
         "reject dates one call at a time, then approve the rest. Requires write permission on the document's scope.",
       inputSchema: {
         doc_id: z.number().int().describe("Document whose dates are reviewed."),
-        approve_all: z.boolean().optional().describe("Approve all of the document's still-pending dates."),
+        approve_all: z.boolean().optional().describe("Approve all of the document's still-pending dates from today on."),
         reject_ids: z.array(z.number().int()).optional().describe("Ids (from list_pending) of dates to reject."),
       },
     },
