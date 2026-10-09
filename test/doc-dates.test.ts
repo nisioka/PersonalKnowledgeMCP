@@ -355,11 +355,30 @@ describe("doc_dates sync and review", () => {
       expect(store.listPendingDates(full, { doc_id: a.document.id + 1000 }).documents).toEqual([]);
     });
 
-    it("limits documents (never a document's items) and puts the nearest date first", async () => {
-      const past = await store.register(full, {
+    it("leaves out dates before today, keeping today's", async () => {
+      const mixed = await store.register(full, {
+        full_text: "受付期間のお知らせ",
+        extracted: {
+          dates: [
+            { date: dayOffset(-1), kind: "event", title: "受付開始" },
+            { date: dayOffset(0), kind: "event", title: "説明会" },
+            { date: dayOffset(30), kind: "deadline", title: "締切" },
+          ],
+        },
+      });
+      await store.register(full, {
         full_text: "過ぎた予定",
         extracted: { dates: [{ date: dayOffset(-30), kind: "event", title: "過ぎた予定" }] },
       });
+
+      // A document whose pending dates have all passed is not listed at all.
+      const { documents, total_documents } = store.listPendingDates(full);
+      expect(total_documents).toBe(1);
+      expect(documents.map((d) => d.doc_id)).toEqual([mixed.document.id]);
+      expect(documents[0]!.items.map((i) => i.title)).toEqual(["説明会", "締切"]);
+    });
+
+    it("limits documents (never a document's items) and puts the nearest date first", async () => {
       const later = await store.register(full, {
         full_text: "先の予定",
         extracted: { dates: [{ date: dayOffset(20), kind: "event", title: "先の予定" }] },
@@ -377,10 +396,9 @@ describe("doc_dates sync and review", () => {
       expect(store.listPendingDates(full).documents.map((d) => d.doc_id)).toEqual([
         soon.document.id,
         later.document.id,
-        past.document.id,
       ]);
       const limited = store.listPendingDates(full, { limit: 1 });
-      expect(limited.total_documents).toBe(3);
+      expect(limited.total_documents).toBe(2);
       expect(limited.documents).toHaveLength(1);
       expect(limited.documents[0]!.items).toHaveLength(2);
     });
@@ -430,6 +448,33 @@ describe("doc_dates sync and review", () => {
         rejected: [deadline.id],
         pending: 0,
       });
+    });
+
+    it("approve_all leaves pending dates before today untouched", async () => {
+      const { document } = await store.register(full, {
+        full_text: "受付期間のお知らせ",
+        extracted: {
+          dates: [
+            { date: dayOffset(-1), kind: "event", title: "受付開始" },
+            { date: dayOffset(0), kind: "event", title: "説明会" },
+            { date: dayOffset(30), kind: "deadline", title: "締切" },
+          ],
+        },
+      });
+      const [opened, briefing, deadline] = rowsOf(document.id) as [DateRow, DateRow, DateRow];
+
+      // The reviewer was never shown the passed date, so it is neither approved nor counted.
+      expect(store.reviewDates(full, document.id, { reject_ids: [deadline.id] }).pending).toBe(1);
+      expect(store.reviewDates(full, document.id, { approve_all: true })).toEqual({
+        doc_id: document.id,
+        approved: [briefing.id],
+        rejected: [],
+        pending: 0,
+      });
+      expect(rowsOf(document.id).map((r) => r.review_status)).toEqual(["pending", "approved", "rejected"]);
+
+      // It can still be rejected by id.
+      expect(store.reviewDates(full, document.id, { reject_ids: [opened.id] }).rejected).toEqual([opened.id]);
     });
 
     it("can reject an approved date; repeating a rejection changes nothing", async () => {

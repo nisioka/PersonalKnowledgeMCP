@@ -474,37 +474,39 @@ export class DocumentStore {
   }
 
   /**
-   * Dates awaiting review, grouped by document. `limit` caps documents, never a
-   * document's items: a reviewer approving "all" must have seen all of them.
-   * Documents with the nearest upcoming pending date come first.
+   * Dates awaiting review, grouped by document. Dates before today are left
+   * out: once a date has passed there is nothing left to confirm. `limit` caps
+   * documents, never a document's items: a reviewer approving "all" must have
+   * seen all of them. Documents with the nearest pending date come first.
    */
   listPendingDates(principal: Principal, params: PendingParams = {}): PendingResult {
     const scopes = resolveReadScopes(principal, params.scopes);
     const limit = clamp(params.limit ?? 20, 1, 100);
     const docFilter = params.doc_id === undefined ? "" : "AND dd.doc_id = ?";
     const docParams = params.doc_id === undefined ? [] : [params.doc_id];
+    const today = todayLocal();
 
     const groups = this.db
       .prepare(
-        `SELECT dd.doc_id, MIN(CASE WHEN dd.date >= ? THEN dd.date END) AS next_date
+        `SELECT dd.doc_id, MIN(dd.date) AS next_date
          FROM doc_dates dd
          JOIN documents d ON d.id = dd.doc_id
-         WHERE dd.review_status = 'pending' AND d.deleted = 0
+         WHERE dd.review_status = 'pending' AND dd.date >= ? AND d.deleted = 0
            AND d.scope IN (${scopes.map(() => "?").join(",")}) ${docFilter}
          GROUP BY dd.doc_id
-         ORDER BY next_date IS NULL, next_date, dd.doc_id`,
+         ORDER BY next_date, dd.doc_id`,
       )
-      .all(todayLocal(), ...scopes, ...docParams) as { doc_id: number }[];
+      .all(today, ...scopes, ...docParams) as { doc_id: number }[];
 
     const documents = groups.slice(0, limit).map(({ doc_id }): PendingDocument => {
       const doc = parseRow(this.db.prepare(`SELECT * FROM documents WHERE id = ?`).get(doc_id) as RawDocRow);
       const items = this.db
         .prepare(
           `SELECT id, date, kind, title FROM doc_dates
-           WHERE doc_id = ? AND review_status = 'pending'
+           WHERE doc_id = ? AND review_status = 'pending' AND date >= ?
            ORDER BY date, id`,
         )
-        .all(doc_id) as PendingDate[];
+        .all(doc_id, today) as PendingDate[];
       const snippet = toSnippet(doc.full_text);
       const title =
         documentTitle(doc) ??
@@ -518,6 +520,8 @@ export class DocumentStore {
    * Record a human's review of one document's dates: reject `reject_ids`, and
    * with `approve_all` approve everything still pending. Either may be used
    * alone, so dates can be rejected one at a time and the rest confirmed later.
+   * `approve_all` covers exactly what `list_pending` shows, so pending dates
+   * before today stay untouched: the reviewer never saw them.
    * Requires the same permission as any other write to the document.
    */
   reviewDates(principal: Principal, docId: number, input: ReviewInput): ReviewResult {
@@ -529,8 +533,8 @@ export class DocumentStore {
 
     const tx = this.db.transaction((): ReviewResult => {
       const rows = this.db
-        .prepare(`SELECT id, review_status FROM doc_dates WHERE doc_id = ? ORDER BY id`)
-        .all(docId) as { id: number; review_status: ReviewStatus }[];
+        .prepare(`SELECT id, date, review_status FROM doc_dates WHERE doc_id = ? ORDER BY id`)
+        .all(docId) as { id: number; date: string; review_status: ReviewStatus }[];
       const statusById = new Map(rows.map((r) => [r.id, r.review_status]));
       const unknown = rejectIds.filter((id) => !statusById.has(id));
       if (unknown.length > 0) {
@@ -544,7 +548,10 @@ export class DocumentStore {
       for (const id of rejected) mark.run("rejected", id);
 
       const rejecting = new Set(rejectIds);
-      const stillPending = rows.filter((r) => r.review_status === "pending" && !rejecting.has(r.id)).map((r) => r.id);
+      const today = todayLocal();
+      const stillPending = rows
+        .filter((r) => r.review_status === "pending" && r.date >= today && !rejecting.has(r.id))
+        .map((r) => r.id);
       const approved = input.approve_all ? stillPending : [];
       for (const id of approved) mark.run("approved", id);
 
